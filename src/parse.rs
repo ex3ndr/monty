@@ -6,7 +6,8 @@ use rustpython_parser::ast::{
 };
 use rustpython_parser::parse_program;
 
-use crate::types::{Expr, Node, Operator, CmpOperator, Value};
+use crate::types::{Expr, Node, Operator, CmpOperator};
+use crate::object::Object;
 
 pub type ParseResult<T> = Result<T, Cow<'static, str>>;
 
@@ -59,7 +60,7 @@ fn parse_statement(statement: Stmt) -> ParseResult<ParseNode> {
             Ok(Node::OpAssign {
                 target: get_name(*target)?,
                 op: convert_op(op),
-                value: Box::new(parse_expression(*value)?),
+                object: Box::new(parse_expression(*value)?),
             })
         }
         StmtKind::AnnAssign { target, value, .. } => match value {
@@ -146,7 +147,7 @@ fn parse_statement(statement: Stmt) -> ParseResult<ParseNode> {
 fn parse_assignment(lhs: AstExpr, rhs: AstExpr) -> ParseResult<ParseNode> {
     let target = get_name(lhs)?;
     let value = Box::new(parse_expression(rhs)?);
-    Ok(Node::Assign { target, value })
+    Ok(Node::Assign { target, object: value })
 }
 
 fn parse_expression(expression: AstExpr) -> ParseResult<ParseExpr> {
@@ -303,26 +304,26 @@ fn convert_compare_op(op: Cmpop) -> CmpOperator {
     }
 }
 
-fn convert_const(c: Constant) -> ParseResult<Value> {
+fn convert_const(c: Constant) -> ParseResult<Object> {
     let v = match c {
-        Constant::None => Value::None,
+        Constant::None => Object::None,
         Constant::Bool(b) => match b {
-            true => Value::True,
-            false => Value::False,
+            true => Object::True,
+            false => Object::False,
         },
-        Constant::Str(s) => Value::Str(s),
-        Constant::Bytes(b) => Value::Bytes(b),
+        Constant::Str(s) => Object::Str(s),
+        Constant::Bytes(b) => Object::Bytes(b),
         Constant::Int(big_int) => match big_int.to_i64() {
-            Some(i) => Value::Int(i),
+            Some(i) => Object::Int(i),
             None => return Err(format!("int {big_int} too big").into()),
         },
         Constant::Tuple(tuple) => {
             let t = tuple.into_iter().map(convert_const).collect::<ParseResult<_>>()?;
-            Value::Tuple(t)
+            Object::Tuple(t)
         }
-        Constant::Float(f) => Value::Float(f),
+        Constant::Float(f) => Object::Float(f),
         Constant::Complex { .. } => return Err("complex constants not supported".into()),
-        Constant::Ellipsis => Value::Ellipsis,
+        Constant::Ellipsis => Object::Ellipsis,
     };
     Ok(v)
 }

@@ -1,5 +1,6 @@
 mod parse;
 mod prepare;
+mod object;
 mod run;
 mod types;
 
@@ -11,7 +12,7 @@ use std::time::Instant;
 use crate::parse::{parse, ParseResult};
 use crate::prepare::{prepare, RunNode};
 use crate::run::{Frame, RunResult};
-use crate::types::Value;
+use crate::object::Object;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -62,7 +63,7 @@ fn read_file(file_path: &str) -> Result<String, String> {
 }
 
 struct Executor {
-    initial_namespace: Vec<Value>,
+    initial_namespace: Vec<Object>,
     nodes: Vec<RunNode>,
 }
 

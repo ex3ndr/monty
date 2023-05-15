@@ -1,7 +1,8 @@
 use ahash::AHashMap;
 use std::borrow::Cow;
 
-use crate::types::{Builtins, Expr, Node, Value};
+use crate::types::{Builtins, Expr, Node};
+use crate::object::Object;
 
 pub(crate) type PrepareResult<T> = Result<T, Cow<'static, str>>;
 
@@ -11,10 +12,10 @@ pub(crate) type RunExpr = Expr<usize, Builtins>;
 /// TODO:
 /// * pre-calculate const expressions
 /// * const assignment add directly to namespace
-pub(crate) fn prepare(nodes: Vec<Node<String, String>>) -> PrepareResult<(Vec<Value>, Vec<RunNode>)> {
+pub(crate) fn prepare(nodes: Vec<Node<String, String>>) -> PrepareResult<(Vec<Object>, Vec<RunNode>)> {
     let mut namespace = Namespace::new(nodes.len());
     let new_nodes = prepare_nodes(nodes, &mut namespace)?;
-    let initial_namespace = vec![Value::Undefined; namespace.names_count];
+    let initial_namespace = vec![Object::Undefined; namespace.names_count];
     Ok((initial_namespace, new_nodes))
 }
 
@@ -27,15 +28,15 @@ fn prepare_nodes(nodes: Vec<Node<String, String>>, namespace: &mut Namespace) ->
                 let expr = prepare_expression(expr, namespace)?;
                 new_nodes.push(Node::Expr(expr));
             }
-            Node::Assign { target, value } => {
+            Node::Assign { target, object: value } => {
                 let target = namespace.get_id(target);
                 let value = Box::new(prepare_expression(*value, namespace)?);
-                new_nodes.push(Node::Assign { target, value });
+                new_nodes.push(Node::Assign { target, object: value });
             }
-            Node::OpAssign { target, op, value } => {
+            Node::OpAssign { target, op, object: value } => {
                 let target = namespace.get_id(target);
                 let value = Box::new(prepare_expression(*value, namespace)?);
-                new_nodes.push(Node::OpAssign { target, op, value });
+                new_nodes.push(Node::OpAssign { target, op, object: value });
             }
             Node::For {
                 target,
