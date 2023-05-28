@@ -120,18 +120,18 @@ impl Prepare {
                     args: args
                         .into_iter()
                         .map(|e| self.prepare_expression(e))
-                        .collect::<PrepareResult<Vec<_>>>()?,
+                        .collect::<PrepareResult<_>>()?,
                     kwargs: kwargs
                         .into_iter()
                         .map(|kwarg| self.prepare_kwarg(kwarg))
-                        .collect::<PrepareResult<Vec<_>>>()?,
+                        .collect::<PrepareResult<_>>()?,
                 }
             }
             Expr::List(elements) => {
                 let expressions = elements
                     .into_iter()
                     .map(|e| self.prepare_expression(e))
-                    .collect::<PrepareResult<Vec<_>>>()?;
+                    .collect::<PrepareResult<_>>()?;
                 Expr::List(expressions)
             }
         };

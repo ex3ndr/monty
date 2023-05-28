@@ -13,26 +13,9 @@ pub type ParseResult<T> = Result<T, Cow<'static, str>>;
 
 pub(crate) fn parse(code: &str, filename: &str) -> ParseResult<Vec<Node>> {
     match parse_program(code, filename) {
-        Ok(ast) => {
-            // dbg!(&ast);
-            let parser = Parser {
-                line_ends: get_line_ends(code),
-            };
-            parser.parse_statements(ast)
-        }
+        Ok(ast) => Parser::new(code).parse_statements(ast),
         Err(e) => Err(format!("Parse error: {e}").into()),
     }
-}
-
-/// position of each line in the source code, to convert indexes to line number and column number
-fn get_line_ends(code: &str) -> Vec<usize> {
-    let mut offsets = vec![0];
-    for (i, c) in code.chars().enumerate() {
-        if c == '\n' {
-            offsets.push(i);
-        }
-    }
-    offsets
 }
 
 pub struct Parser {
@@ -40,6 +23,17 @@ pub struct Parser {
 }
 
 impl Parser {
+    fn new(code: &str) -> Self {
+        // position of each line in the source code, to convert indexes to line number and column number
+        let mut line_ends = vec![0];
+        for (i, c) in code.chars().enumerate() {
+            if c == '\n' {
+                line_ends.push(i);
+            }
+        }
+        Self { line_ends }
+    }
+
     fn parse_statements(&self, statements: Vec<Stmt>) -> ParseResult<Vec<Node>> {
         statements.into_iter().map(|f| self.parse_statement(f)).collect()
     }
@@ -234,7 +228,7 @@ impl Parser {
                 let kwargs = keywords
                     .into_iter()
                     .map(|f| self.parse_kwargs(f))
-                    .collect::<ParseResult<Vec<_>>>()?;
+                    .collect::<ParseResult<_>>()?;
                 Ok(ExprLoc::new(self.convert_range(&range), Expr::Call { func, args, kwargs }))
             }
             ExprKind::FormattedValue {
