@@ -57,7 +57,7 @@ fn add_two_cpython(bench: &mut Bencher) {
 // language=Python
 const LOOP_MOD_13_CODE: &str = "
 v = ''
-for i in range(100):
+for i in range(1_000):
     if i % 13 == 0:
         v += 'x'
 len(v)
@@ -68,7 +68,7 @@ fn loop_mod_13_monty(bench: &mut Bencher) {
     let ex = Executor::new(LOOP_MOD_13_CODE, "test.py", &[]).unwrap();
     let v = ex.run(vec![]).unwrap();
     match v {
-        Exit::Return(Object::Int(v)) => assert_eq!(v, 8),
+        Exit::Return(Object::Int(v)) => assert_eq!(v, 77),
         _ => panic!("unexpected exit: {:?}", v),
     }
 
@@ -85,7 +85,7 @@ fn loop_mod_13_cpython(bench: &mut Bencher) {
             // language=Python
             "def main():
                 v = ''
-                for i in range(100):
+                for i in range(1_000):
                     if i % 13 == 0:
                         v += 'x'
                 return len(v)
@@ -100,7 +100,7 @@ fn loop_mod_13_cpython(bench: &mut Bencher) {
 
         let r = fun.call0(py).unwrap();
         let r: i64 = r.extract(py).unwrap();
-        assert_eq!(r, 8);
+        assert_eq!(r, 77);
 
         bench.iter(|| {
             let r_py = fun.call0(py).unwrap();

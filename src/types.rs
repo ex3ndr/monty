@@ -61,6 +61,8 @@ pub(crate) enum CmpOperator {
     IsNot,
     In,
     NotIn,
+    // we should support floats too, either via a Number type, or ModEqInt and ModEqFloat
+    ModEq(i64),
 }
 
 impl fmt::Display for CmpOperator {
@@ -76,6 +78,7 @@ impl fmt::Display for CmpOperator {
             Self::IsNot => write!(f, "is not"),
             Self::In => write!(f, "in"),
             Self::NotIn => write!(f, "not in"),
+            Self::ModEq(v) => write!(f, "% X == {v}"),
         }
     }
 }

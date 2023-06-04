@@ -6,7 +6,7 @@ use crate::evaluate::Evaluator;
 use crate::exceptions::exc_err;
 use crate::object::Object;
 use crate::parse_error::{ParseError, ParseResult};
-use crate::types::{Builtins, Expr, ExprLoc, Function, Identifier, Kwarg, Node};
+use crate::types::{Builtins, CmpOperator, Expr, ExprLoc, Function, Identifier, Kwarg, Node, Operator};
 
 pub(crate) fn prepare<'c>(nodes: Vec<Node<'c>>, input_names: &[&str]) -> ParseResult<'c, (Vec<Object>, Vec<Node<'c>>)> {
     let mut p = Prepare::new(nodes.len(), input_names, true);
@@ -101,7 +101,7 @@ impl Prepare {
                     let body = self.prepare_nodes(body)?;
                     let or_else = self.prepare_nodes(or_else)?;
                     if test.expr.is_const() {
-                        if test.expr.into_object().bool()? {
+                        if test.expr.into_object().bool() {
                             new_nodes.extend(body);
                         } else {
                             new_nodes.extend(or_else);
@@ -158,6 +158,31 @@ impl Prepare {
                 Expr::List(expressions)
             }
         };
+
+        if let Expr::CmpOp { left, op, right } = &expr {
+            if op == &CmpOperator::Eq {
+                if let Expr::Constant(Object::Int(value)) = right.expr {
+                    if let Expr::Op {
+                        left: left2,
+                        op,
+                        right: right2,
+                    } = &left.expr
+                    {
+                        if op == &Operator::Mod {
+                            let new_expr = Expr::CmpOp {
+                                left: left2.clone(),
+                                op: CmpOperator::ModEq(value),
+                                right: right2.clone(),
+                            };
+                            return Ok(ExprLoc {
+                                position: left.position,
+                                expr: new_expr,
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         let consts: Option<&[bool]> = if self.hit_loop { None } else { Some(&self.consts) };
 

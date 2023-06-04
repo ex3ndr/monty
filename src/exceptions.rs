@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 use std::fmt;
 
+use crate::object::Object;
 use crate::parse::CodeRange;
+use crate::run::RunResult;
+use crate::types::ExprLoc;
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +50,23 @@ impl Exception {
             exc: self,
             frame: Some(StackFrame::from_position(position)),
         }
+    }
+
+    pub(crate) fn operand_type_error<'c, 'd, T>(
+        left: &'d ExprLoc<'c>,
+        op: impl fmt::Display,
+        right: &'d ExprLoc<'c>,
+        left_object: Cow<'d, Object>,
+        right_object: Cow<'d, Object>,
+    ) -> RunResult<'c, T> {
+        let left_type = left_object.type_str();
+        let right_type = right_object.type_str();
+        let new_position = left.position.extend(&right.position);
+        Err(
+            exc!(Exception::TypeError; "unsupported operand type(s) for {op}: '{left_type}' and '{right_type}'")
+                .with_position(new_position)
+                .into(),
+        )
     }
 }
 

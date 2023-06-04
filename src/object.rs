@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use crate::exceptions::{exc_err, Exception, InternalRunError};
+use crate::exceptions::{exc_err, Exception};
 use crate::run::RunResult;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,51 +120,61 @@ impl Object {
         }
     }
 
-    // TODO return an error
-    pub fn eq(&self, other: &Self) -> Option<bool> {
+    /// different name to avoid confusion with `PartialEq::eq`
+    pub fn py_eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Undefined, _) => None,
-            (_, Self::Undefined) => None,
-            (Self::Int(v1), Self::Int(v2)) => Some(v1 == v2),
-            (Self::Str(v1), Self::Str(v2)) => Some(v1 == v2),
+            (Self::Undefined, _) => false,
+            (_, Self::Undefined) => false,
+            (Self::Int(v1), Self::Int(v2)) => v1 == v2,
+            (Self::Str(v1), Self::Str(v2)) => v1 == v2,
             (Self::List(v1), Self::List(v2)) => vecs_equal(v1, v2),
             (Self::Tuple(v1), Self::Tuple(v2)) => vecs_equal(v1, v2),
-            (Self::Range(v1), Self::Range(v2)) => Some(v1 == v2),
-            (Self::True, Self::True) => Some(true),
-            (Self::True, Self::Int(v2)) => Some(1 == *v2),
-            (Self::Int(v1), Self::True) => Some(*v1 == 1),
-            (Self::False, Self::False) => Some(true),
-            (Self::False, Self::Int(v2)) => Some(0 == *v2),
-            (Self::Int(v1), Self::False) => Some(*v1 == 0),
-            (Self::None, Self::None) => Some(true),
-            _ => Some(false),
+            (Self::Range(v1), Self::Range(v2)) => v1 == v2,
+            (Self::True, Self::True) => true,
+            (Self::True, Self::Int(v2)) => 1 == *v2,
+            (Self::Int(v1), Self::True) => *v1 == 1,
+            (Self::False, Self::False) => true,
+            (Self::False, Self::Int(v2)) => 0 == *v2,
+            (Self::Int(v1), Self::False) => *v1 == 0,
+            (Self::None, Self::None) => true,
+            _ => false,
         }
     }
 
-    pub fn bool(&self) -> RunResult<'static, bool> {
+    pub fn bool(&self) -> bool {
         match self {
-            Self::Undefined => Err(InternalRunError::Undefined("".into()).into()),
-            Self::Ellipsis => Ok(true),
-            Self::None => Ok(false),
-            Self::True => Ok(true),
-            Self::False => Ok(false),
-            Self::Int(v) => Ok(*v != 0),
-            Self::Float(f) => Ok(*f != 0.0),
-            Self::Str(v) => Ok(!v.is_empty()),
-            Self::Bytes(v) => Ok(!v.is_empty()),
-            Self::List(v) => Ok(!v.is_empty()),
-            Self::Tuple(v) => Ok(!v.is_empty()),
-            Self::Range(v) => Ok(*v != 0),
-            Self::Exc(_) => Ok(true),
+            Self::Undefined => false,
+            Self::Ellipsis => true,
+            Self::None => false,
+            Self::True => true,
+            Self::False => false,
+            Self::Int(v) => *v != 0,
+            Self::Float(f) => *f != 0.0,
+            Self::Str(v) => !v.is_empty(),
+            Self::Bytes(v) => !v.is_empty(),
+            Self::List(v) => !v.is_empty(),
+            Self::Tuple(v) => !v.is_empty(),
+            Self::Range(v) => *v != 0,
+            Self::Exc(_) => true,
         }
     }
 
-    pub fn modulo(&self, other: &Self) -> Option<Self> {
+    pub fn modulus(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 % v2)),
             (Self::Float(v1), Self::Float(v2)) => Some(Self::Float(v1 % v2)),
             (Self::Float(v1), Self::Int(v2)) => Some(Self::Float(v1 % (*v2 as f64))),
             (Self::Int(v1), Self::Float(v2)) => Some(Self::Float((*v1 as f64) % v2)),
+            _ => None,
+        }
+    }
+
+    pub fn modulus_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
+        match (self, other) {
+            (Self::Int(v1), Self::Int(v2)) => Some(v1 % v2 == right_value),
+            (Self::Float(v1), Self::Float(v2)) => Some(v1 % v2 == right_value as f64),
+            (Self::Float(v1), Self::Int(v2)) => Some(v1 % (*v2 as f64) == right_value as f64),
+            (Self::Int(v1), Self::Float(v2)) => Some((*v1 as f64) % v2 == right_value as f64),
             _ => None,
         }
     }
@@ -217,19 +227,15 @@ impl Object {
     }
 }
 
-fn vecs_equal(v1: &[Object], v2: &[Object]) -> Option<bool> {
+fn vecs_equal(v1: &[Object], v2: &[Object]) -> bool {
     if v1.len() != v2.len() {
-        Some(false)
+        false
     } else {
         for (v1, v2) in v1.iter().zip(v2.iter()) {
-            if let Some(v) = v1.eq(v2) {
-                if !v {
-                    return Some(false);
-                }
-            } else {
-                return None;
+            if !v1.py_eq(v2) {
+                return false;
             }
         }
-        Some(true)
+        true
     }
 }
