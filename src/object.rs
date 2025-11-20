@@ -1,11 +1,16 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt;
+use std::rc::Rc;
 
 use crate::exceptions::{exc_err, ExcType, Exception};
 use crate::run::RunResult;
 use crate::{ParseError, ParseResult};
 
+/// TODO: Move heap-worthy variants (List/Tuple/Str/Bytes/Exceptions/etc.) into the
+/// arena (`HeapData`) once the new runtime object model lands. Keeping them inline
+/// is a temporary bridge so existing code keeps working during the migration.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Object {
     Undefined,
@@ -17,7 +22,7 @@ pub enum Object {
     Bytes(Vec<u8>),
     Float(f64),
     Str(String),
-    List(Vec<Object>),
+    List(Rc<RefCell<Vec<Object>>>),
     Tuple(Vec<Object>),
     Range(i64),
     Exc(Exception),
@@ -35,7 +40,7 @@ impl fmt::Display for Object {
             Self::Float(v) => write!(f, "{v}"),
             Self::Str(v) => write!(f, "{v}"),
             Self::Bytes(v) => write!(f, "{v:?}"), // TODO: format bytes
-            Self::List(v) => format_iterable('[', ']', v, f),
+            Self::List(v) => format_list_display(v, f),
             Self::Tuple(v) => format_iterable('(', ')', v, f),
             Self::Range(size) => write!(f, "0:{size}"),
             Self::Exc(exc) => write!(f, "0:{exc}"),
@@ -55,6 +60,26 @@ fn format_iterable(start: char, end: char, items: &[Object], f: &mut fmt::Format
     write!(f, "{end}")
 }
 
+fn format_list_display(list: &Rc<RefCell<Vec<Object>>>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let borrow = list.borrow();
+    format_iterable('[', ']', &borrow, f)
+}
+
+fn format_list_repr(list: &Rc<RefCell<Vec<Object>>>) -> String {
+    let borrow = list.borrow();
+    let mut s = String::from("[");
+    let mut iter = borrow.iter();
+    if let Some(first) = iter.next() {
+        s.push_str(&first.repr());
+        for item in iter {
+            s.push_str(", ");
+            s.push_str(&item.repr());
+        }
+    }
+    s.push(']');
+    s
+}
+
 impl PartialOrd for Object {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {
@@ -68,7 +93,7 @@ impl PartialOrd for Object {
             (_, Self::False) => self.partial_cmp(&Self::Int(0)),
             (Self::Str(s), Self::Str(o)) => s.partial_cmp(o),
             (Self::Bytes(s), Self::Bytes(o)) => s.partial_cmp(o),
-            (Self::List(s), Self::List(o)) => s.partial_cmp(o),
+            (Self::List(s), Self::List(o)) => s.borrow().partial_cmp(&o.borrow()),
             (Self::Tuple(s), Self::Tuple(o)) => s.partial_cmp(o),
             _ => None,
         }
@@ -92,9 +117,9 @@ impl Object {
             (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 + v2)),
             (Self::Str(v1), Self::Str(v2)) => Some(Self::Str(format!("{v1}{v2}"))),
             (Self::List(v1), Self::List(v2)) => {
-                let mut v = v1.clone();
-                v.extend(v2.clone());
-                Some(Self::List(v))
+                let mut data = v1.borrow().clone();
+                data.extend(v2.borrow().iter().cloned());
+                Some(Self::List(Rc::new(RefCell::new(data))))
             }
             _ => None,
         }
@@ -109,7 +134,7 @@ impl Object {
                 v1.push_str(&v2);
             }
             (Self::List(v1), Self::List(v2)) => {
-                v1.extend(v2);
+                v1.borrow_mut().extend(v2.borrow().iter().cloned());
             }
             (_, other) => return Err(other),
         }
@@ -132,7 +157,7 @@ impl Object {
             (_, Self::Undefined) => false,
             (Self::Int(v1), Self::Int(v2)) => v1 == v2,
             (Self::Str(v1), Self::Str(v2)) => v1 == v2,
-            (Self::List(v1), Self::List(v2)) => vecs_equal(v1, v2),
+            (Self::List(v1), Self::List(v2)) => vecs_equal(&v1.borrow(), &v2.borrow()),
             (Self::Tuple(v1), Self::Tuple(v2)) => vecs_equal(v1, v2),
             (Self::Range(v1), Self::Range(v2)) => v1 == v2,
             (Self::True, Self::True) => true,
@@ -158,7 +183,7 @@ impl Object {
             Self::Float(f) => *f != 0.0,
             Self::Str(v) => !v.is_empty(),
             Self::Bytes(v) => !v.is_empty(),
-            Self::List(v) => !v.is_empty(),
+            Self::List(v) => !v.borrow().is_empty(),
             Self::Tuple(v) => !v.is_empty(),
             Self::Range(v) => *v != 0,
             Self::Exc(_) => true,
@@ -193,7 +218,7 @@ impl Object {
         match self {
             Self::Str(v) => Some(v.len()),
             Self::Bytes(v) => Some(v.len()),
-            Self::List(v) => Some(v.len()),
+            Self::List(v) => Some(v.borrow().len()),
             Self::Tuple(v) => Some(v.len()),
             _ => None,
         }
@@ -205,6 +230,7 @@ impl Object {
         match self {
             Self::Str(v) => format!("'{v}'"),
             Self::Bytes(v) => format!("b'{v:?}'"),
+            Self::List(v) => format_list_repr(v),
             Self::Exc(exc) => exc.repr(),
             _ => self.to_string(),
         }
@@ -245,10 +271,10 @@ impl Object {
         args: Vec<Cow<'d, Self>>,
     ) -> RunResult<'c, Cow<'d, Object>> {
         match (self, attr) {
-            (Self::List(v), Attr::Foobar) => Ok(Cow::Owned(Object::Int(v.len() as i64))),
+            (Self::List(v), Attr::Foobar) => Ok(Cow::Owned(Object::Int(v.borrow().len() as i64))),
             (Self::List(v), Attr::Append) => {
                 if args.len() == 1 {
-                    v.push(args[0].clone().into_owned());
+                    v.borrow_mut().push(args[0].clone().into_owned());
                     Ok(Cow::Owned(Self::None))
                 } else {
                     exc_err!(ExcType::TypeError; "{attr} takes exactly exactly one argument ({} given)", args.len())
@@ -257,7 +283,7 @@ impl Object {
             (Self::List(v), Attr::Insert) => {
                 if args.len() == 2 {
                     let index = args[0].as_int()? as usize;
-                    v.insert(index, args[1].clone().into_owned());
+                    v.borrow_mut().insert(index, args[1].clone().into_owned());
                     Ok(Cow::Owned(Self::None))
                 } else {
                     exc_err!(ExcType::TypeError; "{attr} expected 2 arguments, got {}", args.len())

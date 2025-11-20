@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use crate::exceptions::{internal_err, ExcType, Exception, InternalRunError};
 use crate::expressions::{Expr, ExprLoc, Function, Identifier, Kwarg};
@@ -47,7 +49,7 @@ pub(crate) fn evaluate<'c, 'd>(
                 .iter()
                 .map(|e| evaluate(namespace, heap, e).map(std::borrow::Cow::into_owned))
                 .collect::<RunResult<_>>()?;
-            Ok(Cow::Owned(Object::List(objects)))
+            Ok(Cow::Owned(Object::List(Rc::new(RefCell::new(objects)))))
         }
     }
 }

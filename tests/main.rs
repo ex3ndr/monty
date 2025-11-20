@@ -58,6 +58,13 @@ for i in range(1000):
         v = v + 'x'
 len(v)
 ", "Int(77)";
+    // language=Python
+    shared_list_append: "
+a = [1]
+b = a
+b.append(2)
+len(a)
+", "Int(2)";
 }
 
 macro_rules! execute_raise_tests {

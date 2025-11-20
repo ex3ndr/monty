@@ -25,3 +25,9 @@ repos:
         types: [rust]
         language: system
         pass_filenames: false
+      - id: test
+        name: Test
+        entry: make test
+        types: [rust]
+        language: system
+        pass_filenames: false
