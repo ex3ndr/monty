@@ -31,4 +31,4 @@ cargo run -- <file.py>
 
 ## NOTES
 
-ALWAYS run `cargo fmt` then `cargo check` after making changes and fix all suggestions to maintain code quality.
+ALWAYS run `make lint` after making changes and fix all suggestions to maintain code quality.
