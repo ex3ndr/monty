@@ -434,9 +434,9 @@ impl Object {
     /// # Important
     /// This method MUST be called before overwriting a namespace slot or discarding
     /// a value to prevent memory leaks.
-    pub fn drop_with_heap(&self, heap: &mut Heap) {
+    pub fn drop_with_heap(self, heap: &mut Heap) {
         if let Self::Ref(id) = self {
-            heap.dec_ref(*id);
+            heap.dec_ref(id);
         }
     }
 

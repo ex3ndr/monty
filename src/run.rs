@@ -98,7 +98,11 @@ impl<'c> RunFrame<'c> {
     }
 
     fn assign(&mut self, heap: &mut Heap, target: &Identifier<'c>, expr: &ExprLoc<'c>) -> RunResult<'c, ()> {
-        self.namespace[target.id] = self.execute_expr(heap, expr)?;
+        let new_value = self.execute_expr(heap, expr)?;
+        let old_value = std::mem::replace(&mut self.namespace[target.id], new_value);
+        if let Object::Ref(object_id) = old_value {
+            heap.dec_ref(object_id);
+        }
         Ok(())
     }
 
@@ -109,7 +113,6 @@ impl<'c> RunFrame<'c> {
         op: &Operator,
         expr: &ExprLoc<'c>,
     ) -> RunResult<'c, ()> {
-        // TODO ideally we wouldn't need to clone here since add_mut could take a cow
         let right_object = self.execute_expr(heap, expr)?;
         if let Some(target_object) = self.namespace.get_mut(target.id) {
             let r = match op {

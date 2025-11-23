@@ -62,7 +62,7 @@ impl<'c> Executor<'c> {
         self.heap.borrow()
     }
 
-    /// Executes the compiled code with the given input values.
+    /// Executes the code with the given input values.
     ///
     /// The heap is cleared at the start of each run, ensuring no state leaks between
     /// executions. The initial namespace (stored as Literals) is converted to runtime
@@ -84,8 +84,6 @@ impl<'c> Executor<'c> {
 
         // Fill in the input values (overwriting the default Undefined slots)
         for (i, input) in inputs.into_iter().enumerate() {
-            // Drop the old value before overwriting
-            namespace[i].drop_with_heap(&mut heap);
             namespace[i] = input;
         }
 

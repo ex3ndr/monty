@@ -78,9 +78,9 @@ impl Heap {
         let object = self
             .objects
             .get_mut(id)
-            .unwrap_or_else(|| panic!("Heap::inc_ref: slot {id} missing"))
+            .expect("Heap::inc_ref: slot missing")
             .as_mut()
-            .unwrap_or_else(|| panic!("Heap::inc_ref: object {id} already freed"));
+            .expect("Heap::inc_ref: object already freed");
         object.refcount += 1;
     }
 
@@ -91,21 +91,15 @@ impl Heap {
     pub fn dec_ref(&mut self, id: ObjectId) {
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
-            let slot = self
-                .objects
-                .get_mut(current)
-                .unwrap_or_else(|| panic!("Heap::dec_ref: slot {current} missing"));
-            let entry = slot
-                .as_mut()
-                .unwrap_or_else(|| panic!("Heap::dec_ref: object {current} already freed"));
+            let slot = self.objects.get_mut(current).expect("Heap::dec_ref: slot missing");
+            let entry = slot.as_mut().expect("Heap::dec_ref: object already freed");
             if entry.refcount > 1 {
                 entry.refcount -= 1;
                 continue;
             }
 
-            let owned = slot.take().map(|owned| owned.data);
-            if let Some(data) = owned {
-                enqueue_children(&data, &mut stack);
+            if let Some(object) = slot.take() {
+                enqueue_children(&object.data, &mut stack);
             }
         }
     }
@@ -119,9 +113,9 @@ impl Heap {
         &self
             .objects
             .get(id)
-            .unwrap_or_else(|| panic!("Heap::get: slot {id} missing"))
+            .expect("Heap::get: slot missing")
             .as_ref()
-            .unwrap_or_else(|| panic!("Heap::get: object {id} already freed"))
+            .expect("Heap::get: object already freed")
             .data
     }
 
@@ -133,9 +127,9 @@ impl Heap {
         &mut self
             .objects
             .get_mut(id)
-            .unwrap_or_else(|| panic!("Heap::get_mut: slot {id} missing"))
+            .expect("Heap::get_mut: slot missing")
             .as_mut()
-            .unwrap_or_else(|| panic!("Heap::get_mut: object {id} already freed"))
+            .expect("Heap::get_mut: object already freed")
             .data
     }
 

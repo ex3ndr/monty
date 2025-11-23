@@ -29,9 +29,6 @@ codegen-units = 1
 strip = true
 #debug = true
 
-[lints.rust]
-dead_code = "allow"
-
 [lints.clippy]
 # dbg_macro = "warn"
 # print_stdout = "warn"
