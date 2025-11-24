@@ -302,7 +302,14 @@ impl<'c> Parser<'c> {
 
                 Ok(ExprLoc::new(self.convert_range(range), Expr::List(items)))
             }
-            ExprKind::Tuple { elts: _, ctx: _ } => Err(ParseError::Todo("Tuple")),
+            ExprKind::Tuple { elts, ctx: _ } => {
+                let items = elts
+                    .into_iter()
+                    .map(|f| self.parse_expression(f))
+                    .collect::<ParseResult<_>>()?;
+
+                Ok(ExprLoc::new(self.convert_range(range), Expr::Tuple(items)))
+            }
             ExprKind::Slice {
                 lower: _,
                 upper: _,

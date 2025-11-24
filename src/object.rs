@@ -1,83 +1,37 @@
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt;
-use std::rc::Rc;
 
-use crate::exceptions::{exc_err, ExcType, Exception};
+use crate::exceptions::{exc_err_fmt, ExcType, SimpleException};
+use crate::heap::HeapData;
+use crate::heap::{Heap, ObjectId};
 use crate::run::RunResult;
 use crate::{ParseError, ParseResult};
 
-/// TODO: Move heap-worthy variants (List/Tuple/Str/Bytes/Exceptions/etc.) into the
-/// arena (`HeapData`) once the new runtime object model lands. Keeping them inline
-/// is a temporary bridge so existing code keeps working during the migration.
+/// Primary value type representing Python objects at runtime.
+///
+/// This enum uses a hybrid design: small immediate values (Int, Bool, None) are stored
+/// inline, while heap-allocated objects (List, Str, Dict, etc.) are stored in the arena
+/// and referenced via `Ref(ObjectId)`.
+///
+/// NOTE: We intentionally keep `Clone` and `PartialEq` derives temporarily during
+/// migration, but these will be removed once all code uses `clone_with_heap()` and
+/// heap-aware comparisons. Direct cloning bypasses reference counting and will cause leaks.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Object {
+    // Immediate values (stored inline, no heap allocation)
     Undefined,
     Ellipsis,
     None,
     True,
     False,
     Int(i64),
-    Bytes(Vec<u8>),
     Float(f64),
-    Str(String),
-    List(Rc<RefCell<Vec<Object>>>),
-    Tuple(Vec<Object>),
     Range(i64),
-    Exc(Exception),
-}
+    Exc(SimpleException),
 
-impl fmt::Display for Object {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Undefined => write!(f, "Undefined"),
-            Self::Ellipsis => write!(f, "..."),
-            Self::None => write!(f, "None"),
-            Self::True => write!(f, "True"),
-            Self::False => write!(f, "False"),
-            Self::Int(v) => write!(f, "{v}"),
-            Self::Float(v) => write!(f, "{v}"),
-            Self::Str(v) => write!(f, "{v}"),
-            Self::Bytes(v) => write!(f, "{v:?}"), // TODO: format bytes
-            Self::List(v) => format_list_display(v, f),
-            Self::Tuple(v) => format_iterable('(', ')', v, f),
-            Self::Range(size) => write!(f, "0:{size}"),
-            Self::Exc(exc) => write!(f, "0:{exc}"),
-        }
-    }
-}
-
-fn format_iterable(start: char, end: char, items: &[Object], f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "{start}")?;
-    let mut items_iter = items.iter();
-    if let Some(first) = items_iter.next() {
-        write!(f, "{first}")?;
-        for item in items_iter {
-            write!(f, ", {item}")?;
-        }
-    }
-    write!(f, "{end}")
-}
-
-fn format_list_display(list: &Rc<RefCell<Vec<Object>>>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let borrow = list.borrow();
-    format_iterable('[', ']', &borrow, f)
-}
-
-fn format_list_repr(list: &Rc<RefCell<Vec<Object>>>) -> String {
-    let borrow = list.borrow();
-    let mut s = String::from("[");
-    let mut iter = borrow.iter();
-    if let Some(first) = iter.next() {
-        s.push_str(&first.repr());
-        for item in iter {
-            s.push_str(", ");
-            s.push_str(&item.repr());
-        }
-    }
-    s.push(']');
-    s
+    // Heap-allocated values (stored in arena)
+    Ref(ObjectId),
 }
 
 impl PartialOrd for Object {
@@ -91,10 +45,8 @@ impl PartialOrd for Object {
             (Self::False, _) => Self::Int(0).partial_cmp(other),
             (_, Self::True) => self.partial_cmp(&Self::Int(1)),
             (_, Self::False) => self.partial_cmp(&Self::Int(0)),
-            (Self::Str(s), Self::Str(o)) => s.partial_cmp(o),
-            (Self::Bytes(s), Self::Bytes(o)) => s.partial_cmp(o),
-            (Self::List(s), Self::List(o)) => s.borrow().partial_cmp(&o.borrow()),
-            (Self::Tuple(s), Self::Tuple(o)) => s.partial_cmp(o),
+            // Ref comparison requires heap context, not supported in PartialOrd
+            (Self::Ref(_), Self::Ref(_)) => None,
             _ => None,
         }
     }
@@ -111,31 +63,98 @@ impl From<bool> for Object {
 }
 
 impl Object {
+    /// Performs addition on two objects, allocating result on heap if necessary.
+    ///
+    /// For heap-allocated objects (Ref variant), this method accesses the heap to perform
+    /// the operation and allocates the result on the heap with refcount=1.
     #[must_use]
-    pub fn add(&self, other: &Self) -> Option<Self> {
+    pub fn add(&self, other: &Self, heap: &mut Heap) -> Option<Self> {
+        use crate::heap::HeapData;
+
         match (self, other) {
+            // Immediate value addition
             (Self::Int(v1), Self::Int(v2)) => Some(Self::Int(v1 + v2)),
-            (Self::Str(v1), Self::Str(v2)) => Some(Self::Str(format!("{v1}{v2}"))),
-            (Self::List(v1), Self::List(v2)) => {
-                let mut data = v1.borrow().clone();
-                data.extend(v2.borrow().iter().cloned());
-                Some(Self::List(Rc::new(RefCell::new(data))))
+
+            // Heap-allocated object addition
+            (Self::Ref(id1), Self::Ref(id2)) => {
+                let data1 = heap.get(*id1);
+                let data2 = heap.get(*id2);
+                match (data1, data2) {
+                    (HeapData::Str(s1), HeapData::Str(s2)) => {
+                        let result = format!("{s1}{s2}");
+                        let id = heap.allocate(HeapData::Str(result));
+                        Some(Self::Ref(id))
+                    }
+                    (HeapData::List(list1), HeapData::List(list2)) => {
+                        // Clone the first list's items and extend with second list
+                        let mut result = list1.clone();
+                        result.extend_from_slice(list2);
+                        // Inc ref for all items in result (they're now referenced twice)
+                        for obj in &result {
+                            if let Self::Ref(id) = obj {
+                                heap.inc_ref(*id);
+                            }
+                        }
+                        let id = heap.allocate(HeapData::List(result));
+                        Some(Self::Ref(id))
+                    }
+                    _ => None,
+                }
             }
+
             _ => None,
         }
     }
 
-    pub fn add_mut(&mut self, other: Self) -> Result<(), Self> {
+    /// Performs in-place addition, mutating the left operand.
+    ///
+    /// For heap-allocated objects, this modifies the heap data directly.
+    /// Returns Ok(()) on success, or Err(other) if the operation is not supported.
+    pub fn add_mut(&mut self, other: Self, heap: &mut Heap) -> Result<(), Self> {
+        use crate::heap::HeapData;
+
         match (self, other) {
+            // Immediate value mutation
             (Self::Int(v1), Self::Int(v2)) => {
                 *v1 += v2;
             }
-            (Self::Str(v1), Self::Str(v2)) => {
-                v1.push_str(&v2);
+
+            // Heap-allocated object mutation
+            (Self::Ref(id1), Self::Ref(id2)) => {
+                // Clone the second object's data before mutating the first
+                let data2: HeapData = heap.get(id2).clone();
+
+                match heap.get_mut(*id1) {
+                    HeapData::Str(s1) => {
+                        if let HeapData::Str(s2) = data2 {
+                            s1.push_str(&s2);
+                        } else {
+                            return Err(Self::Ref(id2));
+                        }
+                    }
+                    HeapData::List(list1) => {
+                        if let HeapData::List(mut list2) = data2 {
+                            // Collect IDs to inc_ref after releasing the borrow
+                            let ids_to_inc: Vec<ObjectId> = list2
+                                .iter()
+                                .filter_map(|obj| if let Self::Ref(id) = obj { Some(*id) } else { None })
+                                .collect();
+                            // Extend list1 with list2 items by appending them individually
+                            list1.append(&mut list2);
+                            // Release the mutable borrow
+                            let _ = list1;
+                            // Now inc_ref for all heap objects
+                            for id in ids_to_inc {
+                                heap.inc_ref(id);
+                            }
+                        } else {
+                            return Err(Self::Ref(id2));
+                        }
+                    }
+                    _ => return Err(Self::Ref(id2)),
+                }
             }
-            (Self::List(v1), Self::List(v2)) => {
-                v1.borrow_mut().extend(v2.borrow().iter().cloned());
-            }
+
             (_, other) => return Err(other),
         }
         Ok(())
@@ -151,14 +170,11 @@ impl Object {
 
     /// different name to avoid confusion with `PartialEq::eq`
     #[must_use]
-    pub fn py_eq(&self, other: &Self) -> bool {
+    pub fn py_eq(&self, other: &Self, heap: &Heap) -> bool {
         match (self, other) {
             (Self::Undefined, _) => false,
             (_, Self::Undefined) => false,
             (Self::Int(v1), Self::Int(v2)) => v1 == v2,
-            (Self::Str(v1), Self::Str(v2)) => v1 == v2,
-            (Self::List(v1), Self::List(v2)) => vecs_equal(&v1.borrow(), &v2.borrow()),
-            (Self::Tuple(v1), Self::Tuple(v2)) => vecs_equal(v1, v2),
             (Self::Range(v1), Self::Range(v2)) => v1 == v2,
             (Self::True, Self::True) => true,
             (Self::True, Self::Int(v2)) => 1 == *v2,
@@ -167,13 +183,21 @@ impl Object {
             (Self::False, Self::Int(v2)) => 0 == *v2,
             (Self::Int(v1), Self::False) => *v1 == 0,
             (Self::None, Self::None) => true,
+            (Self::Ref(id1), Self::Ref(id2)) => (*id1 == *id2) || heap.get(*id1).py_eq(heap.get(*id2), heap),
             _ => false,
         }
     }
 
+    /// Returns the truthiness of this object in Python semantics.
+    ///
+    /// For heap-allocated objects, this method requires heap access to check
+    /// if containers are empty.
     #[must_use]
-    pub fn bool(&self) -> bool {
+    pub fn bool(&self, heap: &Heap) -> bool {
+        use crate::heap::HeapData;
+
         match self {
+            // Immediate values
             Self::Undefined => false,
             Self::Ellipsis => true,
             Self::None => false,
@@ -181,12 +205,14 @@ impl Object {
             Self::False => false,
             Self::Int(v) => *v != 0,
             Self::Float(f) => *f != 0.0,
-            Self::Str(v) => !v.is_empty(),
-            Self::Bytes(v) => !v.is_empty(),
-            Self::List(v) => !v.borrow().is_empty(),
-            Self::Tuple(v) => !v.is_empty(),
             Self::Range(v) => *v != 0,
             Self::Exc(_) => true,
+            Self::Ref(id) => match heap.get(*id) {
+                HeapData::Str(s) => !s.is_empty(),
+                HeapData::Bytes(b) => !b.is_empty(),
+                HeapData::List(items) => !items.is_empty(),
+                HeapData::Tuple(items) => !items.is_empty(),
+            },
         }
     }
 
@@ -212,28 +238,55 @@ impl Object {
         }
     }
 
+    /// Returns the length of this object if it has one.
+    ///
+    /// For heap-allocated objects, this method requires heap access to retrieve
+    /// the actual length.
     #[allow(clippy::len_without_is_empty)]
     #[must_use]
-    pub fn len(&self) -> Option<usize> {
+    pub fn len(&self, heap: &Heap) -> Option<usize> {
+        use crate::heap::HeapData;
+
         match self {
-            Self::Str(v) => Some(v.len()),
-            Self::Bytes(v) => Some(v.len()),
-            Self::List(v) => Some(v.borrow().len()),
-            Self::Tuple(v) => Some(v.len()),
+            Self::Ref(id) => match heap.get(*id) {
+                HeapData::Str(s) => Some(s.len()),
+                HeapData::Bytes(b) => Some(b.len()),
+                HeapData::List(items) => Some(items.len()),
+                HeapData::Tuple(items) => Some(items.len()),
+            },
             _ => None,
         }
     }
 
+    /// Returns a Python-style repr string for this object, e.g. `__repr__` / `repr`
+    ///
+    /// For heap-allocated objects, this method requires heap access to retrieve
+    /// and format the actual data.
     #[must_use]
-    pub fn repr(&self) -> String {
-        // TODO these need to match python escaping
+    pub fn repr<'h>(&self, heap: &'h Heap) -> Cow<'h, str> {
         match self {
-            Self::Str(v) => format!("'{v}'"),
-            Self::Bytes(v) => format!("b'{v:?}'"),
-            Self::List(v) => format_list_repr(v),
-            Self::Exc(exc) => exc.repr(),
-            _ => self.to_string(),
+            Self::Ref(id) => match heap.get(*id) {
+                HeapData::Str(s) => string_repr(s).into(),
+                HeapData::Bytes(b) => format!("b'{b:?}'").into(),
+                HeapData::List(items) => repr_sequence('[', ']', items, heap).into(),
+                HeapData::Tuple(items) => repr_sequence('(', ')', items, heap).into(),
+            },
+            _ => self.cow_str(),
         }
+    }
+
+    /// Implementation of Python's `__str__` / `str`.
+    ///
+    /// For heap-allocated objects, this method requires heap access to retrieve
+    /// and format the actual data.
+    #[must_use]
+    pub fn str<'h>(&self, heap: &'h Heap) -> Cow<'h, str> {
+        if let Self::Ref(id) = self {
+            if let HeapData::Str(s) = heap.get(*id) {
+                return Cow::Borrowed(s.as_str());
+            }
+        }
+        self.repr(heap)
     }
 
     /// TODO maybe replace with TryFrom
@@ -241,13 +294,16 @@ impl Object {
         match self {
             Self::Int(i) => Ok(*i),
             // TODO use self.type
-            _ => exc_err!(ExcType::TypeError; "'{self:?}' object cannot be interpreted as an integer"),
+            _ => exc_err_fmt!(ExcType::TypeError; "'{self:?}' object cannot be interpreted as an integer"),
         }
     }
 
-    // TODO this should be replaced by a proper ObjectType enum
+    /// Returns the Python type name for this object.
+    ///
+    /// For heap-allocated objects (Ref variant), this method requires heap access
+    /// to determine the type.
     #[must_use]
-    pub fn type_str(&self) -> &'static str {
+    pub fn type_str(&self, heap: &Heap) -> &'static str {
         match self {
             Self::Undefined => "undefined",
             Self::Ellipsis => "ellipsis",
@@ -256,54 +312,160 @@ impl Object {
             Self::False => "bool",
             Self::Int(_) => "int",
             Self::Float(_) => "float",
-            Self::Str(_) => "str",
-            Self::Bytes(_) => "bytes",
-            Self::List(_) => "list",
-            Self::Tuple(_) => "tuple",
             Self::Range(_) => "range",
             Self::Exc(e) => e.type_str(),
+            Self::Ref(id) => heap.get(*id).type_str(),
         }
     }
 
-    pub(crate) fn attr_call<'c, 'd>(
-        &mut self,
-        attr: &Attr,
-        args: Vec<Cow<'d, Self>>,
-    ) -> RunResult<'c, Cow<'d, Object>> {
+    /// Calls an attribute method on this object (e.g., list.append()).
+    ///
+    /// This method requires heap access to work with heap-allocated objects and
+    /// to generate accurate error messages.
+    pub(crate) fn attr_call<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Vec<Self>) -> RunResult<'c, Object> {
+        use crate::heap::HeapData;
+
         match (self, attr) {
-            (Self::List(v), Attr::Foobar) => Ok(Cow::Owned(Object::Int(v.borrow().len() as i64))),
-            (Self::List(v), Attr::Append) => {
-                if args.len() == 1 {
-                    v.borrow_mut().push(args[0].clone().into_owned());
-                    Ok(Cow::Owned(Self::None))
+            // Heap-allocated list support
+            (Self::Ref(id), Attr::Append) => {
+                let obj_id = *id; // Copy the ID to avoid borrow issues
+                if let HeapData::List(list) = heap.get_mut(obj_id) {
+                    if args.len() == 1 {
+                        let item = args[0].clone();
+                        // Store the item_id if it's a Ref, to inc_ref after releasing the borrow
+                        let item_id_opt = if let Self::Ref(item_id) = &item {
+                            Some(*item_id)
+                        } else {
+                            None
+                        };
+                        list.push(item);
+                        // Release the mutable borrow before calling inc_ref
+                        let _ = list;
+                        if let Some(item_id) = item_id_opt {
+                            heap.inc_ref(item_id);
+                        }
+                        Ok(Self::None)
+                    } else {
+                        exc_err_fmt!(ExcType::TypeError; "{attr} takes exactly exactly one argument ({} given)", args.len())
+                    }
                 } else {
-                    exc_err!(ExcType::TypeError; "{attr} takes exactly exactly one argument ({} given)", args.len())
+                    let type_str = Self::Ref(obj_id).type_str(heap);
+                    exc_err_fmt!(ExcType::AttributeError; "'{}' object has no attribute '{attr}'", type_str)
                 }
             }
-            (Self::List(v), Attr::Insert) => {
-                if args.len() == 2 {
-                    let index = args[0].as_int()? as usize;
-                    v.borrow_mut().insert(index, args[1].clone().into_owned());
-                    Ok(Cow::Owned(Self::None))
+            (Self::Ref(id), Attr::Insert) => {
+                let obj_id = *id; // Copy the ID to avoid borrow issues
+                if let HeapData::List(list) = heap.get_mut(obj_id) {
+                    if args.len() == 2 {
+                        let index = args[0].as_int()? as usize;
+                        let item = args[1].clone();
+                        // Store the item_id if it's a Ref, to inc_ref after releasing the borrow
+                        let item_id_opt = if let Self::Ref(item_id) = &item {
+                            Some(*item_id)
+                        } else {
+                            None
+                        };
+                        list.insert(index, item);
+                        // Release the mutable borrow before calling inc_ref
+                        let _ = list;
+                        if let Some(item_id) = item_id_opt {
+                            heap.inc_ref(item_id);
+                        }
+                        Ok(Self::None)
+                    } else {
+                        exc_err_fmt!(ExcType::TypeError; "{attr} expected 2 arguments, got {}", args.len())
+                    }
                 } else {
-                    exc_err!(ExcType::TypeError; "{attr} expected 2 arguments, got {}", args.len())
+                    let type_str = Self::Ref(obj_id).type_str(heap);
+                    exc_err_fmt!(ExcType::AttributeError; "'{}' object has no attribute '{attr}'", type_str)
                 }
             }
-            (s, _) => exc_err!(ExcType::AttributeError; "'{}' object has no attribute '{attr}'", s.type_str()),
+            (Self::Ref(id), Attr::Foobar) => {
+                let id = *id;
+                if let HeapData::List(list) = heap.get(id) {
+                    Ok(Object::Int(list.len() as i64))
+                } else {
+                    let type_str = Self::Ref(id).type_str(heap);
+                    exc_err_fmt!(ExcType::AttributeError; "'{}' object has no attribute '{attr}'", type_str)
+                }
+            }
+
+            (s, _) => {
+                let type_str = s.type_str(heap);
+                exc_err_fmt!(ExcType::AttributeError; "'{}' object has no attribute '{attr}'", type_str)
+            }
         }
     }
-}
 
-fn vecs_equal(v1: &[Object], v2: &[Object]) -> bool {
-    if v1.len() == v2.len() {
-        for (v1, v2) in v1.iter().zip(v2.iter()) {
-            if !v1.py_eq(v2) {
-                return false;
+    /// Clones an object with proper heap reference counting.
+    ///
+    /// For immediate values (Int, Bool, None, etc.), this performs a simple copy.
+    /// For heap-allocated objects (Ref variant), this increments the reference count
+    /// and returns a new reference to the same heap object.
+    ///
+    /// # Important
+    /// This method MUST be used instead of the derived `Clone` implementation to ensure
+    /// proper reference counting. Using `.clone()` directly will bypass reference counting
+    /// and cause memory leaks or double-frees.
+    #[must_use]
+    pub fn clone_with_heap(&self, heap: &mut Heap) -> Self {
+        match self {
+            Self::Ref(id) => {
+                heap.inc_ref(*id);
+                Self::Ref(*id)
             }
+            // Immediate values can be copied without heap interaction
+            other => other.clone_immediate(),
         }
-        true
-    } else {
-        false
+    }
+
+    /// Drops an object, decrementing its heap reference count if applicable.
+    ///
+    /// For immediate values, this is a no-op. For heap-allocated objects (Ref variant),
+    /// this decrements the reference count and frees the object (and any children) when
+    /// the count reaches zero.
+    ///
+    /// # Important
+    /// This method MUST be called before overwriting a namespace slot or discarding
+    /// a value to prevent memory leaks.
+    pub fn drop_with_heap(self, heap: &mut Heap) {
+        if let Self::Ref(id) = self {
+            heap.dec_ref(id);
+        }
+    }
+
+    /// Internal helper for copying immediate values without heap interaction.
+    ///
+    /// This method should only be called by `clone_with_heap()` for immediate values.
+    /// Attempting to clone a Ref variant will panic.
+    fn clone_immediate(&self) -> Self {
+        match self {
+            Self::Undefined => Self::Undefined,
+            Self::Ellipsis => Self::Ellipsis,
+            Self::None => Self::None,
+            Self::True => Self::True,
+            Self::False => Self::False,
+            Self::Int(v) => Self::Int(*v),
+            Self::Float(v) => Self::Float(*v),
+            Self::Range(v) => Self::Range(*v),
+            Self::Exc(e) => Self::Exc(e.clone()),
+            Self::Ref(_) => unreachable!("Ref clones must go through clone_with_heap to maintain refcounts"),
+        }
+    }
+
+    fn cow_str(&self) -> Cow<'static, str> {
+        match self {
+            Self::Undefined => "Undefined".into(),
+            Self::Ellipsis => "...".into(),
+            Self::None => "None".into(),
+            Self::True => "True".into(),
+            Self::False => "False".into(),
+            Self::Int(v) => format!("{v}").into(),
+            Self::Float(v) => format!("{v}").into(),
+            Self::Range(size) => format!("0:{size}").into(),
+            Self::Exc(exc) => format!("{exc}").into(),
+            Self::Ref(id) => format!("<Ref({id})>").into(),
+        }
     }
 }
 
@@ -335,4 +497,38 @@ impl Attr {
             _ => Err(ParseError::Internal(format!("unknown attribute: `{name}`").into())),
         }
     }
+}
+
+macro_rules! string_replace_common {
+    ($s:expr) => {
+        $s.replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+            .replace('\r', "\\r")
+    };
+}
+
+pub(crate) fn string_repr(s: &str) -> String {
+    // Check if the string contains single quotes but not double quotes
+    if s.contains('\'') && !s.contains('"') {
+        // Use double quotes if string contains only single quotes
+        format!("\"{}\"", string_replace_common!(s))
+    } else {
+        // Use single quotes by default, escape any single quotes in the string
+        format!("'{}'", string_replace_common!(s.replace('\'', "\\'")))
+    }
+}
+
+fn repr_sequence(start: char, end: char, items: &[Object], heap: &Heap) -> String {
+    let mut s = String::from(start);
+    let mut iter = items.iter();
+    if let Some(first) = iter.next() {
+        s.push_str(&first.repr(heap));
+        for item in iter {
+            s.push_str(", ");
+            s.push_str(&item.repr(heap));
+        }
+    }
+    s.push(end);
+    s
 }

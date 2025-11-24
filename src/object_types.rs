@@ -1,16 +1,18 @@
-use std::borrow::Cow;
 use std::fmt;
 
-use crate::exceptions::{exc_err, internal_err, ExcType, Exception, InternalRunError};
+use crate::exceptions::{exc_err_fmt, internal_err, ExcType, InternalRunError, SimpleException};
+use crate::heap::Heap;
 use crate::parse_error::{ParseError, ParseResult};
 use crate::run::RunResult;
-use crate::Object;
+use crate::{HeapData, Object};
 
 // TODO use strum
 #[derive(Debug, Clone)]
 pub(crate) enum FunctionTypes {
     Print,
     Len,
+    Str,
+    Repr,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +28,8 @@ impl fmt::Display for Types {
         match self {
             Self::BuiltinFunction(FunctionTypes::Print) => write!(f, "print"),
             Self::BuiltinFunction(FunctionTypes::Len) => write!(f, "len"),
+            Self::BuiltinFunction(FunctionTypes::Str) => write!(f, "str"),
+            Self::BuiltinFunction(FunctionTypes::Repr) => write!(f, "repr"),
             Self::Exceptions(exc) => write!(f, "{exc}"),
             Self::Range => write!(f, "range"),
         }
@@ -38,6 +42,8 @@ impl Types {
         match name {
             "print" => Ok(Self::BuiltinFunction(FunctionTypes::Print)),
             "len" => Ok(Self::BuiltinFunction(FunctionTypes::Len)),
+            "str" => Ok(Self::BuiltinFunction(FunctionTypes::Str)),
+            "repr" => Ok(Self::BuiltinFunction(FunctionTypes::Repr)),
             "ValueError" => Ok(Self::Exceptions(ExcType::ValueError)),
             "TypeError" => Ok(Self::Exceptions(ExcType::TypeError)),
             "NameError" => Ok(Self::Exceptions(ExcType::NameError)),
@@ -46,38 +52,64 @@ impl Types {
         }
     }
 
-    pub fn call_function<'c, 'd>(&self, args: Vec<Cow<'d, Object>>) -> RunResult<'c, Cow<'d, Object>> {
+    pub fn call_function<'c>(&self, heap: &mut Heap, args: Vec<Object>) -> RunResult<'c, Object> {
         match self {
             Self::BuiltinFunction(FunctionTypes::Print) => {
                 for (i, object) in args.iter().enumerate() {
                     if i == 0 {
-                        print!("{object}");
+                        print!("{}", object.str(heap));
                     } else {
-                        print!(" {object}");
+                        print!(" {}", object.str(heap));
                     }
                 }
                 println!();
-                Ok(Cow::Owned(Object::None))
+                Ok(Object::None)
             }
             Self::BuiltinFunction(FunctionTypes::Len) => {
                 if args.len() != 1 {
-                    return exc_err!(ExcType::TypeError; "len() takes exactly exactly one argument ({} given)", args.len());
+                    return exc_err_fmt!(ExcType::TypeError; "len() takes exactly exactly one argument ({} given)", args.len());
                 }
                 let object = &args[0];
-                match object.len() {
-                    Some(len) => Ok(Cow::Owned(Object::Int(len as i64))),
-                    None => exc_err!(ExcType::TypeError; "Object of type {} has no len()", object),
+                match object.len(heap) {
+                    Some(len) => Ok(Object::Int(len as i64)),
+                    None => exc_err_fmt!(ExcType::TypeError; "Object of type {} has no len()", object.repr(heap)),
                 }
             }
+            Self::BuiltinFunction(FunctionTypes::Str) => {
+                if args.len() != 1 {
+                    return exc_err_fmt!(ExcType::TypeError; "str() takes exactly exactly one argument ({} given)", args.len());
+                }
+                let object = &args[0];
+                let object_id = heap.allocate(HeapData::Str(object.str(heap).into_owned()));
+                Ok(Object::Ref(object_id))
+            }
+            Self::BuiltinFunction(FunctionTypes::Repr) => {
+                if args.len() != 1 {
+                    return exc_err_fmt!(ExcType::TypeError; "repr() takes exactly exactly one argument ({} given)", args.len());
+                }
+                let object = &args[0];
+                let object_id = heap.allocate(HeapData::Str(object.repr(heap).into_owned()));
+                Ok(Object::Ref(object_id))
+            }
             Self::Exceptions(exc_type) => {
-                let args: Vec<Object> = args.into_iter().map(std::borrow::Cow::into_owned).collect();
-                Ok(Cow::Owned(Object::Exc(Exception::call(args, *exc_type))))
+                if let Some(first) = args.first() {
+                    if args.len() == 1 {
+                        if let Object::Ref(object_id) = &first {
+                            if let HeapData::Str(s) = heap.get(*object_id) {
+                                return Ok(Object::Exc(SimpleException::new(*exc_type, Some(s.to_owned().into()))));
+                            }
+                        }
+                    }
+                    internal_err!(InternalRunError::TodoError; "Exceptions can only be called with zero or one string argument")
+                } else {
+                    Ok(Object::Exc(SimpleException::new(*exc_type, None)))
+                }
             }
             Self::Range => {
                 if args.len() == 1 {
                     let object = &args[0];
                     let size = object.as_int()?;
-                    Ok(Cow::Owned(Object::Range(size)))
+                    Ok(Object::Range(size))
                 } else {
                     internal_err!(InternalRunError::TodoError; "range() takes exactly one argument")
                 }

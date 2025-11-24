@@ -45,15 +45,19 @@ cargo test execute_ok_add_ints
 cargo run -- <file.py>
 ```
 
-## NOTES
+## Code style
 
-ALWAYS run `make lint` after making changes and fix all suggestions to maintain code quality.
+Avoid local imports, unless there's a very good reason, all imports should be at the top of the file.
 
 IMPORTANT: every struct, enum and function should be a comprehensive but concise docstring to
 explain what it does and why and any considerations or potential foot-guns of using that type.
 
-Similarly, should add lots of comments to code.
+Similarly, you should add lots of comments to code.
 
 If you see a comment or docstring that's out of date - you MUST update it to be correct.
 
 NOTE: COMMENTS AND DOCSTRINGS ARE EXTREMELY IMPORTANT TO THE LONG TERM HEALTH OF THE PROJECT.
+
+## NOTES
+
+ALWAYS run `make lint` after making changes and fix all suggestions to maintain code quality.

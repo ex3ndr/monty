@@ -1,5 +1,6 @@
 mod evaluate;
 mod exceptions;
+mod exit;
 mod expressions;
 mod heap;
 mod literal;
@@ -11,25 +12,28 @@ mod parse_error;
 mod prepare;
 mod run;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 use crate::exceptions::{InternalRunError, RunError};
-pub use crate::expressions::Exit;
+pub use crate::exit::{Exit, Value};
 use crate::expressions::Node;
-use crate::heap::Heap;
-pub use crate::object::Object;
+use crate::heap::{Heap, HeapData};
+use crate::literal::Literal;
+use crate::object::Object;
 use crate::parse::parse;
+// TODO should these really be public?
 pub use crate::parse_error::{ParseError, ParseResult};
 use crate::prepare::prepare;
 use crate::run::RunFrame;
-use std::cell::RefCell;
 
+/// Main executor that compiles and runs Python code.
+///
+/// The executor stores the compiled AST and initial namespace as literals (not runtime
+/// objects). When `run()` is called, literals are converted to heap-allocated runtime
+/// objects, ensuring proper reference counting from the start of execution.
 #[derive(Debug)]
 pub struct Executor<'c> {
-    initial_namespace: Vec<Object>,
+    initial_namespace: Vec<Literal>,
     nodes: Vec<Node<'c>>,
-    heap: RefCell<Heap>,
+    heap: Heap,
 }
 
 impl<'c> Executor<'c> {
@@ -41,19 +45,36 @@ impl<'c> Executor<'c> {
         Ok(Self {
             initial_namespace,
             nodes,
-            heap: RefCell::new(Heap::new()),
+            heap: Heap::default(),
         })
     }
 
-    pub fn run(&self, inputs: Vec<Object>) -> Result<Exit<'c>, InternalRunError> {
-        let mut namespace = self.initial_namespace.clone();
+    /// Executes the code with the given input values.
+    ///
+    /// The heap is cleared at the start of each run, ensuring no state leaks between
+    /// executions. The initial namespace (stored as Literals) is converted to runtime
+    /// Objects with proper heap allocation and reference counting.
+    ///
+    /// # Arguments
+    /// * `inputs` - Values to fill the first N slots of the namespace (e.g., function parameters)
+    pub fn run<'h>(&'h mut self, inputs: Vec<Object>) -> Result<Exit<'c, 'h>, InternalRunError> {
+        // Clear heap before starting new execution
+        self.heap.clear();
+
+        // Convert initial namespace from Literals to Objects with heap allocation
+        let mut namespace: Vec<Object> = self
+            .initial_namespace
+            .iter()
+            .map(|lit| lit.to_object(&mut self.heap))
+            .collect();
+
+        // Fill in the input values (overwriting the default Undefined slots)
         for (i, input) in inputs.into_iter().enumerate() {
             namespace[i] = input;
         }
-        let mut heap = self.heap.borrow_mut();
-        heap.clear();
-        match RunFrame::new(namespace).execute(&mut heap, &self.nodes) {
-            Ok(v) => Ok(v),
+
+        match RunFrame::new(namespace).execute(&mut self.heap, &self.nodes) {
+            Ok(v) => Ok(Exit::new(v, &self.heap)),
             Err(e) => match e {
                 RunError::Exc(exc) => Ok(Exit::Raise(exc)),
                 RunError::Internal(internal) => Err(internal),

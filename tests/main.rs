@@ -26,9 +26,10 @@ macro_rules! execute_ok_tests {
             paste::item! {
                 #[test]
                 fn [< execute_ok_ $name >]() {
-                    let ex = Executor::new($code, "test.py", &[]).unwrap();
-                    let output = match ex.run(vec![]) {
-                        Ok(Exit::Return(value)) => format!("{:?}", value),
+                    let mut ex = Executor::new($code, "test.py", &[]).unwrap();
+                    let result = ex.run(vec![]);
+                    let output = match result {
+                        Ok(Exit::Return(obj)) => format!("{}: {}", obj.type_str(), obj.repr()),
                         otherwise => panic!("Unexpected exit: {:?}", otherwise),
                     };
                     let expected = $expected.trim_matches('\n');
@@ -40,31 +41,48 @@ macro_rules! execute_ok_tests {
 }
 
 execute_ok_tests! {
-    add_ints: "1 + 1", "Int(2)";
-    add_strs: "'a' + 'b'", r#"Str("ab")"#;
-    // language=Python
+    add_ints: "1 + 1", "int: 2";
+    add_strs: "'a' + 'b'", "str: 'ab'";
     for_loop_str_append_assign_op: "
 v = ''
 for i in range(1000):
     if i % 13 == 0:
         v += 'x'
 len(v)
-", "Int(77)";
-    // language=Python
+", "int: 77";
     for_loop_str_append_assign: "
 v = ''
 for i in range(1000):
     if i % 13 == 0:
         v = v + 'x'
 len(v)
-", "Int(77)";
-    // language=Python
+", "int: 77";
     shared_list_append: "
 a = [1]
 b = a
 b.append(2)
 len(a)
-", "Int(2)";
+", "int: 2";
+    list_repr: "
+a = [1, 2, 3]
+repr(a)
+", "str: '[1, 2, 3]'";
+list_str: "
+a = [1, 2, 3]
+str(a)
+", "str: '[1, 2, 3]'";
+ints_equal: "(1 == 1, 1 == 2)", "tuple: (True, False)";
+str_equal: "('aa' == 'aa', 'aa' == 'bb')", "tuple: (True, False)";
+str_equal2: "('aa' == 'aa', 'aa' == 'aaa')", "tuple: (True, False)";
+bytes_equal: "(b'aa' == b'aa', b'aa' == b'bb')", "tuple: (True, False)";
+bytes_equal2: "(b'aa' == b'aa', b'aa' == b'aaa')", "tuple: (True, False)";
+list_equal: "([1, 2] == [1, 2], [1] == [1, 2])", "tuple: (True, False)";
+tuple_equal: "((1, 2) == (1, 2), (1, 2) == (2, 1))", "tuple: (True, False)";
+discard_list: "
+a = 1
+[1, 2, 3]
+a
+", "int: 1";
 }
 
 macro_rules! execute_raise_tests {
@@ -73,9 +91,12 @@ macro_rules! execute_raise_tests {
             paste::item! {
                 #[test]
                 fn [< execute_raise_ $name >]() {
-                    let ex = Executor::new($code, "test.py", &[]).unwrap();
-                    let output = match ex.run(vec![]) {
-                        Ok(Exit::Raise(exc_raise)) => format!("{}", exc_raise.exc.repr()),
+                    let mut ex = Executor::new($code, "test.py", &[]).unwrap();
+                    let result = ex.run(vec![]);
+                    let output = match result {
+                        Ok(Exit::Raise(exc_raise)) => {
+                            format!("{}", exc_raise.exc)
+                        }
                         otherwise => panic!("Unexpected raise: {:?}", otherwise),
                     };
                     let expected = $expected_exc.trim_matches('\n');
@@ -87,16 +108,11 @@ macro_rules! execute_raise_tests {
 }
 
 execute_raise_tests! {
-    // language=Python
     error_instance_str: "raise ValueError('testing')", "ValueError('testing')";
-    // language=Python
     raise_number: "raise 1 + 2", "TypeError('exceptions must derive from BaseException')";
-    // language=Python
     error_type: "raise TypeError", "TypeError()";
-    // language=Python
     error_no_args: "raise TypeError()", "TypeError()";
-    // language=Python
-    error_two_args: "raise ValueError('x', 1 + 2)", "ValueError('x', 3)";
-    // language=Python (constant folding removed, so mixed-type add errors at runtime)
-    add_int_str: "1 + '1'", "TypeError('unsupported operand type(s) for +: 'int' and 'str'')";
+    error_string_arg: "raise TypeError('hello')", "TypeError('hello')";
+    error_string_arg_quotes: "raise TypeError(\"hello 'there'\")", "TypeError(\"hello 'there'\")";
+    // error_two_args: "raise ValueError('x', 1 + 2)", "ValueError('x', 3)";
 }

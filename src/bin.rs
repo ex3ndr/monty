@@ -20,7 +20,7 @@ fn main() -> ExitCode {
     let input_names = vec![];
     let inputs = vec![];
 
-    let ex = match Executor::new(&code, file_path, &input_names) {
+    let mut ex = match Executor::new(&code, file_path, &input_names) {
         Ok(ex) => ex,
         Err(err) => {
             eprintln!("Error parsing code: {err}");

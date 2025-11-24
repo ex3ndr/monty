@@ -15,22 +15,23 @@ path = "src/bin.rs"
 rustpython-parser = { git = "https://github.com/charliermarsh/RustPython.git", rev = "c3147d2c1524ebd0e90cf1c2938d770314fd5a5a" }
 ahash = "0.8.0"
 num = "0.4.0"
-mimalloc = "0.1.30"
 #strum = { version = "0.25", features = ["derive"] }
 #strum_macros = "0.25"
 
 [dev-dependencies]
 paste = "1.0.7"
 pyo3 = { version = "0.19.0", features = ["auto-initialize"] }
+criterion = "0.5"
+
+[[bench]]
+name = "main"
+harness = false
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = true
 #debug = true
-
-[lints.rust]
-dead_code = "allow"
 
 [lints.clippy]
 # dbg_macro = "warn"

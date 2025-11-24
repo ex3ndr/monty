@@ -1,32 +1,25 @@
-#![feature(test)]
+use criterion::{black_box, criterion_group, criterion_main, Bencher, Criterion};
 
-extern crate test;
-
-use test::{black_box, Bencher};
-
-use monty::{Executor, Exit, Object};
+use monty::Executor;
 
 use pyo3::prelude::*;
 
-#[bench]
+/// Benchmarks adding two numbers using Monty interpreter
 fn add_two_monty(bench: &mut Bencher) {
-    let ex = Executor::new("1 + 2", "test.py", &[]).unwrap();
-    let v = ex.run(vec![]).unwrap();
-    match v {
-        Exit::Return(Object::Int(v)) => assert_eq!(v, 3),
-        _ => panic!("unexpected exit: {:?}", v),
-    }
+    let mut ex = Executor::new("1 + 2", "test.py", &[]).unwrap();
+    let r = ex.run(vec![]).unwrap();
+
+    let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
+    assert_eq!(int_value, 3);
 
     bench.iter(|| {
-        let r = match ex.run(vec![]).unwrap() {
-            Exit::Return(Object::Int(v)) => v,
-            _ => -1,
-        };
-        black_box(r);
+        let r = ex.run(vec![]).unwrap();
+        let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
+        black_box(int_value);
     });
 }
 
-#[bench]
+/// Benchmarks adding two numbers using CPython
 fn add_two_cpython(bench: &mut Bencher) {
     Python::with_gil(|py| {
         let fun: PyObject = PyModule::from_code(
@@ -63,21 +56,21 @@ for i in range(1_000):
 len(v)
 ";
 
-#[bench]
+/// Benchmarks a loop with modulo operations using Monty interpreter
 fn loop_mod_13_monty(bench: &mut Bencher) {
-    let ex = Executor::new(LOOP_MOD_13_CODE, "test.py", &[]).unwrap();
-    let v = ex.run(vec![]).unwrap();
-    match v {
-        Exit::Return(Object::Int(v)) => assert_eq!(v, 77),
-        _ => panic!("unexpected exit: {:?}", v),
-    }
+    let mut ex = Executor::new(LOOP_MOD_13_CODE, "test.py", &[]).unwrap();
+    let r = ex.run(vec![]).unwrap();
+    let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
+    assert_eq!(int_value, 77);
 
     bench.iter(|| {
-        black_box(ex.run(vec![]).unwrap());
+        let r = ex.run(vec![]).unwrap();
+        let int_value: i64 = (&r.value().unwrap()).try_into().unwrap();
+        black_box(int_value);
     });
 }
 
-#[bench]
+/// Benchmarks a loop with modulo operations using CPython
 fn loop_mod_13_cpython(bench: &mut Bencher) {
     Python::with_gil(|py| {
         let fun: PyObject = PyModule::from_code(
@@ -110,15 +103,15 @@ fn loop_mod_13_cpython(bench: &mut Bencher) {
     });
 }
 
-#[bench]
+/// Benchmarks end-to-end execution (parsing + running) using Monty
 fn end_to_end_monty(bench: &mut Bencher) {
     bench.iter(|| {
-        let ex = Executor::new(black_box("1 + 2"), "test.py", &[]).unwrap();
+        let mut ex = Executor::new(black_box("1 + 2"), "test.py", &[]).unwrap();
         black_box(ex.run(vec![]).unwrap());
     });
 }
 
-#[bench]
+/// Benchmarks end-to-end execution (parsing + running) using CPython
 fn end_to_end_cpython(bench: &mut Bencher) {
     Python::with_gil(|py| {
         bench.iter(|| {
@@ -133,3 +126,24 @@ fn end_to_end_cpython(bench: &mut Bencher) {
         });
     });
 }
+
+/// Configures all benchmark groups
+fn criterion_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("add_two");
+    group.bench_function("monty", add_two_monty);
+    group.bench_function("cpython", add_two_cpython);
+    group.finish();
+
+    let mut group = c.benchmark_group("loop_mod_13");
+    group.bench_function("monty", loop_mod_13_monty);
+    group.bench_function("cpython", loop_mod_13_cpython);
+    group.finish();
+
+    let mut group = c.benchmark_group("end_to_end");
+    group.bench_function("monty", end_to_end_monty);
+    group.bench_function("cpython", end_to_end_cpython);
+    group.finish();
+}
+
+criterion_group!(benches, criterion_benchmark);
+criterion_main!(benches);

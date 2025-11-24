@@ -2,19 +2,24 @@ use std::collections::hash_map::Entry;
 
 use ahash::AHashMap;
 
-use crate::exceptions::{internal_err, ExcType, Exception, ExceptionRaise};
+use crate::exceptions::{internal_err, ExcType, ExceptionRaise, SimpleException};
 use crate::expressions::{Expr, ExprLoc, Function, Identifier, Kwarg, Node};
 use crate::literal::Literal;
-use crate::object::Object;
 use crate::object_types::Types;
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::{ParseError, ParseResult};
 
-pub(crate) fn prepare<'c>(nodes: Vec<Node<'c>>, input_names: &[&str]) -> ParseResult<'c, (Vec<Object>, Vec<Node<'c>>)> {
+/// Prepares parsed nodes for execution by resolving names and building the initial namespace.
+///
+/// Returns the initial namespace as Literals (not runtime Objects) along with the prepared nodes.
+/// The namespace will be converted to runtime Objects when execution begins and the heap is available.
+pub(crate) fn prepare<'c>(
+    nodes: Vec<Node<'c>>,
+    input_names: &[&str],
+) -> ParseResult<'c, (Vec<Literal>, Vec<Node<'c>>)> {
     let mut p = Prepare::new(nodes.len(), input_names, true);
     let new_nodes = p.prepare_nodes(nodes)?;
-    let namespace = p.namespace.into_iter().map(Literal::into_object).collect();
-    Ok((namespace, new_nodes))
+    Ok((p.namespace, new_nodes))
 }
 
 struct Prepare {
@@ -146,7 +151,7 @@ impl Prepare {
             } => {
                 let (object, is_new) = self.get_id(object);
                 if is_new {
-                    let exc: ExceptionRaise = Exception::new(object.name, ExcType::NameError).into();
+                    let exc: ExceptionRaise = SimpleException::new(ExcType::NameError, Some(object.name.into())).into();
                     return Err(exc.into());
                 }
                 let (args, kwargs) = self.get_args_kwargs(args, kwargs)?;
@@ -163,6 +168,13 @@ impl Prepare {
                     .map(|e| self.prepare_expression(e))
                     .collect::<ParseResult<_>>()?;
                 Expr::List(expressions)
+            }
+            Expr::Tuple(elements) => {
+                let expressions = elements
+                    .into_iter()
+                    .map(|e| self.prepare_expression(e))
+                    .collect::<ParseResult<_>>()?;
+                Expr::Tuple(expressions)
             }
         };
 
@@ -205,7 +217,7 @@ impl Prepare {
     /// either return the id for a name, or insert that name and get its ID
     /// returns (id, whether the id is newly added)
     fn get_id<'c>(&mut self, ident: Identifier<'c>) -> (Identifier<'c>, bool) {
-        let (id, is_new) = match self.name_map.entry(ident.name.to_string()) {
+        let (id, is_new) = match self.name_map.entry(ident.name.clone()) {
             Entry::Occupied(e) => {
                 let id = e.get();
                 (*id, false)
