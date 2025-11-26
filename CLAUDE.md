@@ -64,13 +64,16 @@ NOTE: COMMENTS AND DOCSTRINGS ARE EXTREMELY IMPORTANT TO THE LONG TERM HEALTH OF
 
 Tests should always be as concise as possible while covering all possible cases.
 
-Unless the test must check very specific behaviour, all python execution behavior should be only require adding
-test fixtures to `test_cases/`. The file names should take the form `<group_name>__<test_name>.py`.
+All Python execution behavior tests use file-based fixtures in `test_cases/`. File names: `<group_name>__<test_name>.py`.
 
-Review other tests in the same file or elsewhere in `tests/` and follow the same styles.
+**Expectation formats** (on last line of file):
+- `# Return=value` - Check `repr()` output
+- `# Return.str=value` - Check `str()` output
+- `# Return.type=typename` - Check `type()` output
+- `# Raise=Exception('message')` - Expect exception
+- `# ParseError=message` - Expect parse error
 
-In particular, use macros as shown in `tests/main.rs` to allow you to create many tests without them becoming
-too repetitive, verbose and hard to read and update.
+These tests are run via `datatest-stable` harness in `tests/datatest_runner.rs`.
 
 ## NOTES
 

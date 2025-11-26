@@ -1,12 +1,29 @@
 # Arena Hybrid Design
 
-This document outlines the recommended architecture for Monty to achieve Python-compatible reference semantics while maintaining performance and safety.
+This document outlines the architecture for Monty to achieve Python-compatible reference semantics while maintaining performance and safety.
+
+## Implementation Status
+
+**COMPLETED:**
+- ✅ Phase 0: Literal (`Const`) enum for compile-time constants
+- ✅ Phase 1: Core heap infrastructure (`src/heap.rs`)
+- ✅ Phase 2: Evaluation threading heap through all functions
+- ✅ Phase 3: Assignment & cloning semantics with `clone_with_heap`/`drop_with_heap`
+- ✅ Phase 4: Object identity & `is` operator
+- ✅ Phase 5: List methods with reference semantics
+
+**NOT YET IMPLEMENTED:**
+- ⬜ Phase 6: Exception objects on heap (currently `Object::Exc(SimpleException)`)
+- ⬜ Phase 7: Small integer caching (not needed - immediates are inline)
+- ⬜ Phase 8: String interning
+- ⬜ Dictionary support
+- ⬜ Cycle detection / mark-sweep GC
 
 ## Executive Summary
 
-**Current Problem**: Clone-based `Object` enum creates value semantics, incompatible with Python's reference semantics.
+**Problem Solved**: The hybrid heap design provides Python-compatible reference semantics.
 
-**Recommended Solution**: Hybrid design with:
+**Current Architecture**:
 - **Immediate values** (Int, Bool, None) stored inline
 - **Heap objects** (List, Str, Dict) allocated in arena with unique IDs
 - **Reference counting** for memory management
@@ -175,18 +192,15 @@ struct HeapObject {
     data: HeapData,
 }
 
-/// Data stored on heap
-#[derive(Clone, Debug)]
+/// Data stored on heap (actual implementation)
+#[derive(Debug)]
 pub enum HeapData {
-    Str(String),
-    Bytes(Vec<u8>),
-    List(Vec<Object>),
-    Tuple(Vec<Object>),
-    Set(HashSet<Object>),       // Only hashable objects allowed (Python rule)
-    FrozenSet(HashSet<Object>), // Immutable set, cached hash populated
-    Dict(HashMap<Object, Object>),
-    Exception(Exception),
-    // Future: Function, Class, Instance, etc.
+    Object(Box<Object>),  // Boxed immediates for id()
+    Str(Str),
+    Bytes(Bytes),
+    List(List),
+    Tuple(Tuple),
+    // Future: Dict, Set, FrozenSet, Function, Class, Instance, etc.
 }
 ```
 
@@ -918,10 +932,10 @@ The simplified approach (no free list, monotonic IDs per run) trades some memory
 
 ## Next Steps
 
-1. **Proof of concept**: Implement Phase 1-2 in a branch
-2. **Benchmark**: Compare performance vs current implementation
-3. **Validate**: Ensure existing tests pass
-4. **Full migration**: Complete Phase 3-6
-5. **Optimize**: Add Phase 7-8 enhancements
+**Core heap design is implemented.** Remaining work:
 
-Estimated effort: 2-3 weeks for core implementation, 1-2 weeks for optimization and testing.
+1. **Dictionary support**: Add `HeapData::Dict` variant
+2. **Cycle detection**: Mark-sweep GC for circular references
+3. **String interning**: Optional optimization
+4. **User-defined functions**: Requires scope chains
+5. **Classes**: Object model, MRO, descriptors

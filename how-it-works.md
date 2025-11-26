@@ -254,29 +254,33 @@ pub fn execute(frame: &mut RunFrame<'c>, nodes: &[Node<'c>]) -> RunResult<'c, ()
 
 #### 3.2 Expression Evaluation (evaluate.rs)
 
-The key function signature:
+The key function signatures:
 ```rust
-pub fn evaluate<'c, 'd>(
+pub fn evaluate_use<'c, 'd>(
     namespace: &'d mut [Object],
+    heap: &'d mut Heap,
     expr_loc: &'d ExprLoc<'c>,
-) -> RunResult<'c, Cow<'d, Object>>
+) -> RunResult<'c, Object>
+
+pub fn evaluate_discard<'c, 'd>(
+    namespace: &'d mut [Object],
+    heap: &'d mut Heap,
+    expr_loc: &'d ExprLoc<'c>,
+) -> RunResult<'c, ()>
 ```
 
-Returns `Cow<'d, Object>` to borrow from namespace when possible:
-- `Cow::Borrowed(&namespace[id])` - zero-copy for variable lookups
-- `Cow::Owned(result)` - new value for computed expressions
+Returns owned `Object`, using `clone_with_heap()` for proper reference counting.
 
 **Expression Types:**
 
 ```rust
-match expr {
-    Expr::Constant(obj) => Ok(Cow::Borrowed(obj)),
-    Expr::Name(ident) => Ok(Cow::Borrowed(&namespace[ident.id])),
+match &expr_loc.expr {
+    Expr::Constant(literal) => Ok(literal.to_object(heap)),
+    Expr::Name(ident) => Ok(namespace[ident.id].clone_with_heap(heap)),
     Expr::Op { left, op, right } => {
-        let l = evaluate(namespace, left)?.into_owned();  // Release borrow!
-        let r = evaluate(namespace, right)?;
-        let result = l.add(&r)?;
-        Ok(Cow::Owned(result))
+        let left_obj = evaluate_use(namespace, heap, left)?;
+        let right_obj = evaluate_use(namespace, heap, right)?;
+        left_obj.py_add(&right_obj, heap)
     }
     // ...
 }
@@ -312,27 +316,29 @@ pub struct CodeRange<'c> {
 ### Object Representation
 
 ```rust
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Object {
+    // Immediate values (stored inline, no heap allocation)
+    Undefined,
+    Ellipsis,
+    None,
+    Bool(bool),
     Int(i64),
     Float(f64),
-    Str(String),
-    Bytes(Vec<u8>),
-    List(Vec<Object>),
-    Tuple(Vec<Object>),
-    Bool(bool),
-    None,
-    Exc(Exception),  // Exception as a value
-    Undefined,       // Uninitialized variable marker
+    Range(i64),
+    Exc(SimpleException),
+
+    // Heap-allocated values (stored in arena)
+    Ref(ObjectId),
 }
 ```
 
 **Key Design Points:**
 
-1. **No Heap Pointers**: Lists/tuples own their elements directly
-2. **Clone-based**: Operations clone objects (acceptable for prototype/sandbox use)
+1. **Hybrid Design**: Small immediate values (Int, Bool, None) stored inline; heap objects (List, Str, etc.) referenced via `Ref(ObjectId)`
+2. **Reference Counting**: Heap objects use refcounting via `clone_with_heap()` and `drop_with_heap()`
 3. **Type Coercion**: Cross-type operations (e.g., `1 < 2.5`) use `PartialOrd`
-4. **Exceptions as Values**: Exceptions are first-class objects
+4. **Exceptions as Values**: Exceptions are first-class objects via `SimpleException`
 
 ### Namespace Design
 
@@ -362,13 +368,14 @@ let namespace = vec![
 ### src/lib.rs (Public API)
 ```rust
 pub struct Executor<'c> {
-    initial_namespace: Vec<Object>,
+    initial_namespace: Vec<Const>,  // Literals, not runtime objects
     nodes: Vec<Node<'c>>,
+    heap: Heap,  // Arena for heap-allocated objects
 }
 
 impl<'c> Executor<'c> {
     pub fn new(code: &'c str, filename: &'c str, input_names: &[&str]) -> ParseResult<'c, Self>
-    pub fn run(&self, inputs: Vec<Object>) -> RunResult<'c, Exit<'c>>
+    pub fn run(&mut self, inputs: Vec<Object>) -> Result<Exit<'c, '_>, InternalRunError>
 }
 ```
 
@@ -416,39 +423,67 @@ struct NameTracker {
 
 **Stack Frame Management**: Maintains parent chain for tracebacks
 
-### src/evaluate.rs (146 lines)
+### src/evaluate.rs
 **Responsibility**: Evaluate expressions
 
 **Key Functions:**
-- `evaluate()`: Main evaluator, returns `Cow<'d, Object>`
+- `evaluate_use()`: Main evaluator, returns `Object`
+- `evaluate_discard()`: Evaluates expression without returning value
 - `evaluate_bool()`: Optimized boolean evaluation
 - `eval_op()`: Binary operators (+, -, %)
-- `cmp_op()`: Comparison operators (==, <, >, etc.)
+- `cmp_op()`: Comparison operators (==, <, >, is, etc.)
 - `call_function()`: Builtin function calls
 - `attr_call()`: Method calls (e.g., `list.append()`)
 
-**Borrow Checker Patterns** (see Advanced Topics section)
-
-### src/object.rs (303 lines)
+### src/object.rs
 **Responsibility**: Object type and operations
 
-**Methods:**
-- Operators: `add()`, `sub()`, `modulus()`, etc.
-- Mutations: `py_iadd()` for `+=` operations
-- Comparisons: `py_eq()`, `lt()`, `gt()`, etc. (via `PartialOrd`)
-- Utilities: `bool()`, `repr()`, `Display`
-- Attribute calls: `attr_call()` dispatches to methods like `list_append()`
+**Key Methods:**
+- `clone_with_heap()`: Clones with proper refcounting
+- `drop_with_heap()`: Drops with proper refcounting
+- `id()`: Returns stable object ID, boxes immediates to heap if needed
+- `is()`: Python `is` operator using object identity
+- `call_attr()`: Dispatches method calls to heap objects
+- `as_int()`: Extract integer value
 
-**Type System**: Manual type checking with helpful errors:
+Implements `PyValue` trait for Python-compatible operations.
+
+### src/heap.rs
+**Responsibility**: Arena allocator for heap objects
+
+**Key Types:**
 ```rust
-fn add(&self, other: &Object) -> Option<Object> {
-    match (self, other) {
-        (Object::Int(a), Object::Int(b)) => Some(Object::Int(a + b)),
-        (Object::Str(a), Object::Str(b)) => Some(Object::Str(format!("{a}{b}"))),
-        _ => None,  // Will generate TypeError
-    }
+pub type ObjectId = usize;
+
+pub enum HeapData {
+    Object(Box<Object>),  // Boxed immediates for id()
+    Str(Str),
+    Bytes(Bytes),
+    List(List),
+    Tuple(Tuple),
+}
+
+pub struct Heap {
+    objects: Vec<Option<HeapObject>>,
 }
 ```
+
+**Key Methods:**
+- `allocate()`: Create new heap object
+- `inc_ref()`, `dec_ref()`: Reference counting
+- `get()`, `get_mut()`: Access heap data
+- `with_entry_mut()`, `with_two()`: Borrow-safe mutation helpers
+- `clear()`: Reset between runs
+
+### src/values/ (module)
+**Responsibility**: Heap-allocated Python types
+
+Contains:
+- `List`: Vec<Object> with append/insert
+- `Str`: String wrapper
+- `Bytes`: Vec<u8> wrapper
+- `Tuple`: Immutable Vec<Object>
+- `PyValue` trait: Common interface for all heap types
 
 ### src/builtins.rs (112 lines)
 **Responsibility**: Builtin functions and exception-like constructors
@@ -474,17 +509,23 @@ Exception types (`ExcType`) continue to live in `exceptions.rs`; the prepare pha
 directly tags calls as either `Function::Builtin(Builtins)` or `Function::Exception(ExcType)` so
 runtime dispatch no longer needs an intermediate `Types` enum.
 
-### src/expressions.rs (228 lines)
+### src/expressions.rs
 **Responsibility**: Internal AST types
 
 **Key Types:**
+- `Const`: Compile-time literals (Int, Str, Bytes, Bool, None, etc.)
 - `Node<'c>`: Statement-level AST
 - `Expr<'c>`: Expression-level AST
 - `ExprLoc<'c>`: Expression + position
-- `Identifier<'c>`: Variable reference
-- `Function<'c>`: Builtin or user-defined (latter not yet implemented)
-- `Exit<'c>`: Execution result
-- `Attr`: Attribute names (e.g., `append` for lists)
+- `Identifier<'c>`: Variable reference with resolved ID
+- `Callable<'c>`: Builtin, Exception, or Ident
+
+### src/exit.rs
+**Responsibility**: Execution result types
+
+**Key Types:**
+- `Exit<'c, 'h>`: Return(Value) or Raise(ExceptionRaise)
+- `Value<'h>`: Wrapper with py_str(), py_repr(), py_type() methods
 
 ### src/operators.rs (78 lines)
 **Responsibility**: Operator enums
@@ -495,37 +536,41 @@ runtime dispatch no longer needs an intermediate `Types` enum.
 
 Both implement `Display` for error messages.
 
-### src/exceptions.rs (296 lines)
+### src/exceptions.rs
 **Responsibility**: Error handling
 
 **Exception Types:**
 ```rust
 pub enum ExcType {
-    ValueError, TypeError, NameError,
-    AttributeError, NotImplementedError,
+    ValueError, TypeError, NameError, AttributeError,
 }
 
-pub struct Exception {
+pub struct SimpleException {
     exc_type: ExcType,
-    args: Vec<Object>,  // Can hold multiple arguments
+    arg: Option<Cow<'static, str>>,  // Single optional string argument
 }
 
 pub struct ExceptionRaise<'c> {
-    exc: Exception,
-    frame: StackFrame<'c>,  // Where it was raised
+    exc: SimpleException,
+    frame: Option<StackFrame<'c>>,  // Where it was raised
 }
 ```
 
 **Internal Errors:**
 ```rust
 pub enum InternalRunError {
-    Error(String),          // Internal interpreter bug
-    TodoError(String),      // Unimplemented feature
-    Undefined(String),      // Uninitialized variable
+    Error(Cow<'static, str>),
+    TodoError(Cow<'static, str>),
+    Undefined(Cow<'static, str>),
+}
+
+pub enum RunError<'c> {
+    Internal(InternalRunError),
+    Exc(ExceptionRaise<'c>),
 }
 ```
 
-**Error Macros**: `exc!`, `exc_err!`, `internal_error!`, `internal_err!`
+**Error Macros**: `exc_static!`, `exc_fmt!`, `exc_err_static!`, `exc_err_fmt!`, `internal_error!`, `internal_err!`
 
 **Traceback Generation**: `StackFrame` chains together with parent links
 
@@ -674,54 +719,36 @@ Exit::Return(Object::Int(5))
 
 ## Advanced Topics
 
-### Borrow Checker Patterns in evaluate.rs
+### Heap Borrow Patterns
 
-The `evaluate()` function signature is carefully designed:
+The heap design uses several patterns to avoid borrow checker conflicts:
+
+**Pattern 1: Clone With Heap**
 ```rust
-pub fn evaluate<'c, 'd>(
-    namespace: &'d mut [Object],
-    expr_loc: &'d ExprLoc<'c>,
-) -> RunResult<'c, Cow<'d, Object>>
+// Objects must be cloned with heap for proper refcounting
+let cloned = object.clone_with_heap(heap);  // Increments refcount
+object.drop_with_heap(heap);  // Decrements refcount when done
 ```
 
-**Challenge**: `evaluate()` takes a mutable borrow of `namespace` and returns a `Cow` that might borrow from it. Calling `evaluate()` twice creates conflicting borrows.
-
-**Pattern 1: Sequential Evaluation (Binary Operators)**
+**Pattern 2: Temporary Extraction (Attribute Calls)**
 ```rust
-// WRONG - Double borrow!
-let left = evaluate(namespace, left)?;   // Borrows namespace
-let right = evaluate(namespace, right)?; // ERROR: Already borrowed!
-
-// CORRECT - Release first borrow
-let left = evaluate(namespace, left)?.into_owned();  // Release borrow
-let right = evaluate(namespace, right)?;             // Now OK
+// Heap temporarily removes entry to allow reentrant access
+impl Heap {
+    pub fn call_attr(&mut self, id: ObjectId, attr: &Attr, args: Vec<Object>) {
+        let mut entry = self.take_entry(id);  // Remove from heap
+        let result = entry.data.py_call_attr(self, attr, args);  // Safe to use heap
+        self.restore_entry(id, entry);  // Put back
+        result
+    }
+}
 ```
 
-**Pattern 2: Closure Evaluation (Function Arguments)**
+**Pattern 3: Two-Entry Access**
 ```rust
-// WRONG - Closure captures namespace mutably
-let args: Vec<Cow<Object>> = args
-    .iter()
-    .map(|a| evaluate(namespace, a))  // ERROR: Captured ref escapes
-    .collect::<RunResult<_>>()?;
-
-// CORRECT - Convert to owned in closure
-let args: Vec<Cow<Object>> = args
-    .iter()
-    .map(|a| evaluate(namespace, a).map(|o| Cow::Owned(o.into_owned())))
-    .collect::<RunResult<_>>()?;
-```
-
-**Pattern 3: Evaluate Before Mutating (Attribute Calls)**
-```rust
-// WRONG - Get mutable ref, then try to evaluate args
-let object = namespace.get_mut(id)?;  // Mutable borrow
-let args = evaluate_args(namespace)?;  // ERROR: Already borrowed!
-
-// CORRECT - Evaluate args first
-let args = evaluate_args(namespace)?;  // Immutable borrows (released)
-let object = namespace.get_mut(id)?;   // Now get mutable borrow
-object.method(args)
+// Access two heap entries simultaneously for binary ops
+heap.with_two(left_id, right_id, |heap, left_data, right_data| {
+    left_data.py_add(right_data, heap)
+})
 ```
 
 ### Performance Optimizations
@@ -730,10 +757,10 @@ object.method(args)
 - Variables use `Vec` indexing: `O(1)` vs. HashMap: `O(log n)`
 - Hot path (expression evaluation) benefits most
 
-**2. Cow<Object> for Zero-Copy**
-- Variable lookups: `Cow::Borrowed(&namespace[id])` - no allocation
-- Computed values: `Cow::Owned(result)` - allocation only when needed
-- Reduces cloning by ~30-40% in typical code
+**2. Hybrid Object Model**
+- Immediate values (Int, Bool, None) stored inline - no heap allocation
+- Heap objects (List, Str) share references via refcounting
+- Assignment is O(1) inc_ref instead of O(n) clone
 
 **3. Constant Folding**
 - Moves computation from runtime to compile time
@@ -791,34 +818,31 @@ NameError: name 'x' is not defined
 
 ### Testing Strategy
 
-**Macro-Based Test Patterns:**
+**File-Based Test Fixtures:**
 
-```rust
-// Parse-time error tests
-parse_error_tests! {
-    add_int_str: "1 + '1'", "TypeError: unsupported operand type(s) for +: 'int' and 'str'";
-}
+Tests live in `test_cases/` as Python files with expectations in comments:
 
-// Success tests
-execute_ok_tests! {
-    add_ints: "1 + 1", "Int(2)";
-}
-
-// Exception tests
-execute_raise_tests! {
-    error_instance: "raise ValueError('test')", "ValueError('test')";
-}
+```python
+# test_cases/execute_ok__add_ints.py
+1 + 1
+# Return=2
 ```
 
+**Expectation Formats:**
+- `# Return=value` - Check py_repr() output
+- `# Return.str=value` - Check py_str() output
+- `# Return.type=typename` - Check py_type() output
+- `# Raise=Exception('message')` - Expect exception
+- `# ParseError=message` - Expect parse error
+
 **Benefits:**
-- One macro call generates full test function
-- Easy to add many test cases
-- Consistent test structure
+- Data-driven tests via datatest-stable harness
+- Easy to add cases: just create a `.py` file
+- Test names derived from filenames
 
 **PyO3 Integration:**
 - `dev-dependencies` includes PyO3
 - Can compare Monty output vs. CPython for correctness testing
-- See `run_cpython.py` for reference implementation
 
 ## Recent Feature Development
 
@@ -1016,47 +1040,31 @@ fn optimize_mod_eq(expr: &Expr) -> Option<Expr> {
 
 ### 6. mimalloc Integration
 
-**Commit**: `2e87244` (add mimalloc)
-
 **What Changed:**
 - Added `mimalloc` as global allocator
-- Faster memory allocation for `Object` cloning
+- Faster memory allocation for heap objects
 - No code changes required (drop-in replacement)
 
-**Configuration:**
-```rust
-// In src/lib.rs:
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-```
-
-**Rationale:**
-- Monty clones `Object` frequently (no reference counting yet)
-- mimalloc optimized for frequent alloc/dealloc patterns
-- 5-10% performance improvement in benchmarks
+**Note:** mimalloc has since been removed from the dependencies.
 
 ### Current Implementation Status
 
 **Implemented Features:**
-- ✅ Exception raising with multiple arguments
+- ✅ Hybrid heap design with reference counting
+- ✅ Python `is` operator (object identity)
+- ✅ Reference semantics for heap types (list mutation visible through aliases)
 - ✅ List methods: `append()`, `insert()`
 - ✅ ModEq optimization for `(x % y) == z` patterns
-- ✅ Clean module organization (separate operators, expressions, builtins)
-- ✅ Borrow-safe evaluation patterns throughout
+- ✅ Strings, bytes, tuples as heap types
+- ✅ `id()` builtin with stable identity
 
 **Current Limitations:**
-- ⚠️ Only two list methods implemented (more needed)
-- ⚠️ Attribute access on other types not yet implemented
 - ⚠️ User-defined functions still return `TodoError`
 - ⚠️ No dictionary support
 - ⚠️ Many operators still unimplemented (*, /, **, etc.)
-
-**Development Priorities** (based on TODO.md):
-1. Implement more list methods
-2. Add dictionary support
-3. Implement function definitions and calls
-4. Add more operators
-5. Implement break/continue statements
+- ⚠️ No `in`/`not in` operators
+- ⚠️ No try/except
+- ⚠️ No classes
 
 ---
 
@@ -1068,35 +1076,17 @@ This section identifies fundamental issues with the current design that may limi
 
 ### Performance Issues
 
-#### 1. Clone-Based Object Model
+#### 1. ~~Clone-Based Object Model~~ (RESOLVED)
 
-**Problem**: Every operation clones objects rather than using reference counting:
+The hybrid heap design now provides reference semantics for heap types:
 ```rust
 pub enum Object {
-    List(Vec<Object>),  // Owns all elements
-    Str(String),        // Owns string data
-    // ...
+    Int(i64),           // Immediate - copied
+    Ref(ObjectId),      // Heap reference - refcounted
 }
 ```
 
-**Impact**:
-- List operations: `list.append(x)` clones `x`
-- Variable assignment: `y = x` clones the entire object
-- Function arguments: All args are cloned on call
-- Large data structures (nested lists, long strings) have O(n) copy costs
-
-**Example of inefficiency**:
-```python
-# CPython: O(1) reference copies
-big_list = [1] * 1000000
-x = big_list  # Fast reference copy
-y = big_list  # Another fast reference copy
-
-# Monty: O(n) full clones
-# Each assignment copies all 1,000,000 integers
-```
-
-**Mitigation**: Cow<Object> helps for reads but not writes. Real solution requires reference counting or GC.
+List assignment is now O(1) reference increment, not O(n) clone.
 
 #### 2. No String Interning
 
@@ -1166,97 +1156,42 @@ for i in range(1000000):  # Creates list of 1M integers
 
 ### Fundamental Design Dead-Ends
 
-#### 1. Value Semantics vs Reference Semantics
+#### 1. ~~Value Semantics vs Reference Semantics~~ (RESOLVED)
 
-**The Core Problem**: Python uses reference semantics, Monty uses value semantics.
+The hybrid heap design now provides correct Python reference semantics:
 
-**CPython behavior**:
 ```python
 a = [1, 2, 3]
-b = a        # b references same list
+b = a        # b references same list (inc_ref)
 b.append(4)
-print(a)     # [1, 2, 3, 4] - modified!
+print(a)     # [1, 2, 3, 4] - correctly modified!
 ```
 
-**Monty behavior** (current):
-```python
-a = [1, 2, 3]
-b = a        # b is a CLONE of a
-b.append(4)
-print(a)     # [1, 2, 3] - unchanged!
-```
+Heap types (List, Str, Tuple, Bytes) now share references correctly.
 
-**Impact**: This breaks fundamental Python semantics. Any code relying on shared mutable state will behave incorrectly.
+#### 2. ~~No Object Identity~~ (RESOLVED)
 
-**Examples that fail**:
-```python
-# Example 1: Accumulator pattern
-def accumulate(result):
-    result.append(1)
-
-my_list = []
-accumulate(my_list)  # Modifies a clone, not my_list
-print(my_list)       # [] - empty! Should be [1]
-
-# Example 2: Cache pattern
-cache = {}
-def get_or_compute(key, cache):
-    if key not in cache:
-        cache[key] = expensive_computation()
-    return cache[key]
-
-# Each call gets a cloned cache - no sharing!
-
-# Example 3: Default mutable arguments
-def append_to(element, target=[]):
-    target.append(element)
-    return target
-
-print(append_to(1))  # [1]
-print(append_to(2))  # [2] - should be [1, 2]!
-```
-
-**Fix required**: Full reference counting or garbage collection system.
-
-#### 2. No Object Identity
-
-**Problem**: Can't implement `is` operator correctly:
+The `is` operator is now implemented via `Object::id()`:
 ```python
 a = [1, 2, 3]
 b = a
-print(a is b)  # Should be True (same object)
+print(a is b)  # True - same ObjectId
 
 c = [1, 2, 3]
-print(a is c)  # Should be False (different objects)
+print(a is c)  # False - different ObjectIds
 ```
 
-**Current limitation**: No object IDs, no way to track identity
+Immediates (None, True, False) have constant IDs; heap objects return their ObjectId.
 
-**Why it matters**:
-- Singleton pattern (`x is None` is idiomatic)
-- Caching and memoization
-- Detecting cycles
-- `__eq__` vs `is` distinction
+#### 3. No Cycle Detection
 
-**Fix required**: Heap allocation with object IDs
-
-#### 3. No Circular Reference Support
-
-**Problem**: Clone-based model can't represent cycles:
+**Problem**: Reference counting without cycle detection leaks circular references:
 ```python
 a = []
-a.append(a)  # Circular reference
-print(a)     # Should print: [[...]]
+a.append(a)  # Creates cycle - refcount never hits 0
 ```
 
-**Monty**: Would infinitely clone trying to copy `a`
-
-**CPython**: Reference counting + cycle detector handles this
-
-**Impact**:
-- Can't represent graphs
-- Can't implement certain data structures (linked lists with back pointers)
-- Crashes on circular structures
+**Impact**: Memory leaks with circular data structures. Needs mark-sweep GC to collect cycles.
 
 #### 4. Lifetime 'c Prevents Dynamic Code
 
@@ -1615,15 +1550,16 @@ class Point:
 
 #### What Works Well
 1. ✅ Simple numeric computation
-2. ✅ String manipulation (without sharing)
+2. ✅ String/list manipulation with proper reference semantics
 3. ✅ Basic control flow (if, for)
 4. ✅ Safe sandboxing (no FFI, no file I/O)
-5. ✅ Fast compilation (prepare phase)
+5. ✅ Object identity (`is` operator)
+6. ✅ Fast compilation (prepare phase)
 
-#### What's Fundamentally Broken
-1. ❌ Any code relying on reference semantics
+#### What's Not Yet Implemented
+1. ❌ User-defined functions
 2. ❌ Closures and nested scopes
-3. ❌ Object-oriented programming
+3. ❌ Classes
 4. ❌ Exception handling (no try/except)
 5. ❌ Iterators and generators
 6. ❌ Module system and imports
@@ -1641,61 +1577,21 @@ class Point:
 - **Web frameworks**: Django/Flask need classes, imports, exceptions
 - **Scripts**: Most scripts need file I/O, imports, exception handling
 
-### Path Forward: Architectural Redesign Required
+### Path Forward
 
-To support more complete Python semantics, Monty would need:
+**Completed:**
+1. ✅ Heap-allocated objects with IDs
+2. ✅ Reference counting
 
-1. **Heap-Allocated Objects with IDs**
-   ```rust
-   type ObjectId = usize;
-   struct Heap {
-       objects: Vec<HeapObject>,
-   }
-   enum Object {
-       Ref(ObjectId),  // Most values
-       Immediate(i64), // Small integers
-   }
-   ```
-
-2. **Reference Counting or GC**
-   ```rust
-   struct HeapObject {
-       refcount: usize,
-       data: ObjectData,
-   }
-   ```
-
-3. **Scope Chain for Namespaces**
-   ```rust
-   struct Namespace {
-       locals: HashMap<String, ObjectId>,
-       parent: Option<Box<Namespace>>,
-   }
-   ```
-
-4. **Owned AST (no lifetime 'c)**
-   ```rust
-   pub struct Node {
-       // Use String instead of &'c str
-   }
-   ```
-
-5. **Bytecode Intermediate Representation**
-   ```rust
-   enum Bytecode {
-       LoadFast(usize),
-       BinaryAdd,
-       StoreGlobal(String),
-       // ...
-   }
-   ```
-
-These changes would fundamentally alter the project's simplicity and implementation complexity, but are necessary for CPython compatibility.
+**Still Needed:**
+1. **Scope Chain for Namespaces** - for closures, global/nonlocal
+2. **Cycle Detection** - mark-sweep GC for circular references
+3. **User-defined Functions** - function objects, call frames
+4. **Classes** - object model, MRO, descriptors
+5. **Owned AST** - for eval()/exec()
 
 ### Conclusion
 
-Monty is an excellent **educational interpreter** and **proof of concept** for sandboxed Python execution. However, its core design decisions—particularly clone-based value semantics and flat namespace design—create fundamental incompatibilities with Python's reference semantics and scoping rules.
+Monty is a **sandboxed Python interpreter** that now implements proper Python reference semantics via a hybrid heap design with reference counting. The recent architectural improvements have resolved the fundamental value/reference semantics mismatch.
 
-The interpreter is well-suited for a **restricted subset** of Python focused on numeric computation and basic control flow. For broader Python compatibility, a ground-up redesign with heap allocation, reference counting, and proper scope chains would be necessary.
-
-The current design represents a reasonable trade-off: simplicity and safety over complete compatibility. Whether this is acceptable depends entirely on the intended use case.
+The interpreter supports a **growing subset** of Python including lists, tuples, strings, bytes with correct aliasing behavior, and object identity. For broader compatibility, additional work is needed on user-defined functions, classes, and scope chains.

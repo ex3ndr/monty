@@ -25,4 +25,4 @@ test:
 	cargo test
 
 .PHONY: all
-all: format lint test
+all: lint test

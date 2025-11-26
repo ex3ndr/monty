@@ -7,7 +7,11 @@
 - [x] Phase 3: Move heap-worthy types (list → str/bytes → dict/set/frozenset → tuple/exception) into `HeapData` and update cloning/assignment helpers.
 - [x] Phase 3.5: Move heap-worthy Object variants (list/tuple/str/bytes/exception) into `HeapData`.
 - [x] Phase 4: Support `is`/`is not` via object identity.
-- [ ] Phase 5: Update list/string mutation paths to work with shared references.
-- [ ] Phase 6: Move exceptions onto the heap.
-- [ ] Phase 7: Optional integer caching (if still relevant with immediates).
-- [ ] Phase 8: String interning / other optimizations.
+- [x] Phase 5: Update list/string mutation paths to work with shared references.
+- [ ] Phase 6: Cycle detection (mark-sweep GC) — required before closures/classes per plan.md:859.
+- [ ] Phase 7: String interning / other optimizations.
+- [ ] Phase 8: Scope chain design (LEGB resolution) — needed for closures/global/nonlocal per plan.md:861.
+
+
+Others:
+* replace varied methods for checking argument counts
