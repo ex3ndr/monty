@@ -57,6 +57,23 @@ impl<'c, 'e> ArgObjects<'c, 'e> {
         }
     }
 
+    /// Create a new namespace for a function arguments
+    pub fn inject_into_namespace(self, namespace: &mut Vec<Object<'c, 'e>>) {
+        match self {
+            Self::Zero => (),
+            Self::One(a) => {
+                namespace.push(a);
+            }
+            Self::Two(a1, a2) => {
+                namespace.push(a1);
+                namespace.push(a2);
+            }
+            Self::Many(v) => {
+                namespace.extend(v);
+            }
+        }
+    }
+
     /// Returns the number of arguments.
     fn count(&self) -> usize {
         match self {

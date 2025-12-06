@@ -10,11 +10,50 @@ use crate::args::{ArgExprs, Kwarg};
 use crate::builtins::Builtins;
 use crate::callable::Callable;
 use crate::exceptions::ExcType;
-use crate::expressions::{Expr, ExprLoc, Identifier, Literal, Node};
+use crate::expressions::{Expr, ExprLoc, Identifier, Literal};
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::ParseError;
 
-pub(crate) fn parse<'c>(code: &'c str, filename: &'c str) -> Result<Vec<Node<'c>>, ParseError<'c>> {
+#[derive(Debug, Clone)]
+pub(crate) enum ParseNode<'c> {
+    Pass,
+    Expr(ExprLoc<'c>),
+    Return(ExprLoc<'c>),
+    ReturnNone,
+    Raise(Option<ExprLoc<'c>>),
+    Assign {
+        target: Identifier<'c>,
+        object: ExprLoc<'c>,
+    },
+    OpAssign {
+        target: Identifier<'c>,
+        op: Operator,
+        object: ExprLoc<'c>,
+    },
+    SubscriptAssign {
+        target: Identifier<'c>,
+        index: ExprLoc<'c>,
+        value: ExprLoc<'c>,
+    },
+    For {
+        target: Identifier<'c>,
+        iter: ExprLoc<'c>,
+        body: Vec<ParseNode<'c>>,
+        or_else: Vec<ParseNode<'c>>,
+    },
+    If {
+        test: ExprLoc<'c>,
+        body: Vec<ParseNode<'c>>,
+        or_else: Vec<ParseNode<'c>>,
+    },
+    FunctionDef {
+        name: Identifier<'c>,
+        params: Vec<&'c str>,
+        body: Vec<ParseNode<'c>>,
+    },
+}
+
+pub(crate) fn parse<'c>(code: &'c str, filename: &'c str) -> Result<Vec<ParseNode<'c>>, ParseError<'c>> {
     match parse_module(code) {
         Ok(parsed) => {
             let module = parsed.into_syntax();
@@ -46,19 +85,19 @@ impl<'c> Parser<'c> {
         }
     }
 
-    fn parse_statements(&self, statements: Vec<Stmt>) -> Result<Vec<Node<'c>>, ParseError<'c>> {
+    fn parse_statements(&self, statements: Vec<Stmt>) -> Result<Vec<ParseNode<'c>>, ParseError<'c>> {
         statements.into_iter().map(|f| self.parse_statement(f)).collect()
     }
 
-    fn parse_elif_else_clauses(&self, clauses: Vec<ElifElseClause>) -> Result<Vec<Node<'c>>, ParseError<'c>> {
-        let mut tail: Vec<Node<'c>> = Vec::new();
+    fn parse_elif_else_clauses(&self, clauses: Vec<ElifElseClause>) -> Result<Vec<ParseNode<'c>>, ParseError<'c>> {
+        let mut tail: Vec<ParseNode<'c>> = Vec::new();
         for clause in clauses.into_iter().rev() {
             match clause.test {
                 Some(test) => {
                     let test = self.parse_expression(test)?;
                     let body = self.parse_statements(clause.body)?;
                     let or_else = tail;
-                    let nested = Node::If { test, body, or_else };
+                    let nested = ParseNode::If { test, body, or_else };
                     tail = vec![nested];
                 }
                 None => {
@@ -69,31 +108,56 @@ impl<'c> Parser<'c> {
         Ok(tail)
     }
 
-    fn parse_statement(&self, statement: Stmt) -> Result<Node<'c>, ParseError<'c>> {
+    fn parse_statement(&self, statement: Stmt) -> Result<ParseNode<'c>, ParseError<'c>> {
         match statement {
             Stmt::FunctionDef(function) => {
                 if function.is_async {
-                    Err(ParseError::Todo("AsyncFunctionDef"))
-                } else {
-                    Err(ParseError::Todo("FunctionDef"))
+                    return Err(ParseError::Todo("AsyncFunctionDef"));
                 }
+
+                // Reject unsupported features
+                if function.parameters.vararg.is_some() {
+                    return Err(ParseError::Todo("*args"));
+                } else if function.parameters.kwarg.is_some() {
+                    return Err(ParseError::Todo("**kwargs"));
+                } else if !function.parameters.kwonlyargs.is_empty() {
+                    return Err(ParseError::Todo("keyword-only arguments"));
+                } else if !function.parameters.posonlyargs.is_empty() {
+                    return Err(ParseError::Todo("positional-only arguments"));
+                }
+
+                // Parse parameters - only positional without defaults
+                let mut params = Vec::with_capacity(function.parameters.args.len());
+                for param in &function.parameters.args {
+                    // Reject default argument values
+                    if param.default.is_some() {
+                        return Err(ParseError::Todo("default argument values"));
+                    }
+                    params.push(&self.code[param.parameter.name.range]);
+                }
+
+                let name = self.identifier_from_range(function.name.range);
+                // Parse function body recursively
+                let body = self.parse_statements(function.body)?;
+
+                Ok(ParseNode::FunctionDef { name, params, body })
             }
             Stmt::ClassDef(_) => Err(ParseError::Todo("ClassDef")),
             Stmt::Return(ast::StmtReturn { value, .. }) => match value {
-                Some(value) => Ok(Node::Return(self.parse_expression(*value)?)),
-                None => Ok(Node::ReturnNone),
+                Some(value) => Ok(ParseNode::Return(self.parse_expression(*value)?)),
+                None => Ok(ParseNode::ReturnNone),
             },
             Stmt::Delete(_) => Err(ParseError::Todo("Delete")),
             Stmt::TypeAlias(_) => Err(ParseError::Todo("TypeAlias")),
             Stmt::Assign(ast::StmtAssign { targets, value, .. }) => self.parse_assignment(first(targets)?, *value),
-            Stmt::AugAssign(ast::StmtAugAssign { target, op, value, .. }) => Ok(Node::OpAssign {
+            Stmt::AugAssign(ast::StmtAugAssign { target, op, value, .. }) => Ok(ParseNode::OpAssign {
                 target: self.parse_identifier(*target)?,
                 op: convert_op(op),
                 object: self.parse_expression(*value)?,
             }),
             Stmt::AnnAssign(ast::StmtAnnAssign { target, value, .. }) => match value {
                 Some(value) => self.parse_assignment(*target, *value),
-                None => Ok(Node::Pass),
+                None => Ok(ParseNode::Pass),
             },
             Stmt::For(ast::StmtFor {
                 is_async,
@@ -106,7 +170,7 @@ impl<'c> Parser<'c> {
                 if is_async {
                     return Err(ParseError::Todo("AsyncFor"));
                 }
-                Ok(Node::For {
+                Ok(ParseNode::For {
                     target: self.parse_identifier(*target)?,
                     iter: self.parse_expression(*iter)?,
                     body: self.parse_statements(body)?,
@@ -123,7 +187,7 @@ impl<'c> Parser<'c> {
                 let test = self.parse_expression(*test)?;
                 let body = self.parse_statements(body)?;
                 let or_else = self.parse_elif_else_clauses(elif_else_clauses)?;
-                Ok(Node::If { test, body, or_else })
+                Ok(ParseNode::If { test, body, or_else })
             }
             Stmt::With(ast::StmtWith { is_async, .. }) => {
                 if is_async {
@@ -134,12 +198,12 @@ impl<'c> Parser<'c> {
             }
             Stmt::Match(_) => Err(ParseError::Todo("Match")),
             Stmt::Raise(ast::StmtRaise { exc, .. }) => {
-                // TODO add cause to Node::Raise
+                // TODO add cause to ParseNode::Raise
                 let expr = match exc {
                     Some(expr) => Some(self.parse_expression(*expr)?),
                     None => None,
                 };
-                Ok(Node::Raise(expr))
+                Ok(ParseNode::Raise(expr))
             }
             Stmt::Try(ast::StmtTry { is_star, .. }) => {
                 if is_star {
@@ -153,8 +217,8 @@ impl<'c> Parser<'c> {
             Stmt::ImportFrom(_) => Err(ParseError::Todo("ImportFrom")),
             Stmt::Global(_) => Err(ParseError::Todo("Global")),
             Stmt::Nonlocal(_) => Err(ParseError::Todo("Nonlocal")),
-            Stmt::Expr(ast::StmtExpr { value, .. }) => Ok(Node::Expr(self.parse_expression(*value)?)),
-            Stmt::Pass(_) => Ok(Node::Pass),
+            Stmt::Expr(ast::StmtExpr { value, .. }) => Ok(ParseNode::Expr(self.parse_expression(*value)?)),
+            Stmt::Pass(_) => Ok(ParseNode::Pass),
             Stmt::Break(_) => Err(ParseError::Todo("Break")),
             Stmt::Continue(_) => Err(ParseError::Todo("Continue")),
             Stmt::IpyEscapeCommand(_) => Err(ParseError::Todo("IpyEscapeCommand")),
@@ -163,17 +227,17 @@ impl<'c> Parser<'c> {
 
     /// `lhs = rhs` -> `lhs, rhs`
     /// Handles both simple assignments (x = value) and subscript assignments (dict[key] = value)
-    fn parse_assignment(&self, lhs: AstExpr, rhs: AstExpr) -> Result<Node<'c>, ParseError<'c>> {
+    fn parse_assignment(&self, lhs: AstExpr, rhs: AstExpr) -> Result<ParseNode<'c>, ParseError<'c>> {
         // Check if this is a subscript assignment like dict[key] = value
         if let AstExpr::Subscript(ast::ExprSubscript { value, slice, .. }) = lhs {
-            Ok(Node::SubscriptAssign {
+            Ok(ParseNode::SubscriptAssign {
                 target: self.parse_identifier(*value)?,
                 index: self.parse_expression(*slice)?,
                 value: self.parse_expression(rhs)?,
             })
         } else {
             // Simple identifier assignment like x = value
-            Ok(Node::Assign {
+            Ok(ParseNode::Assign {
                 target: self.parse_identifier(lhs)?,
                 object: self.parse_expression(rhs)?,
             })
@@ -279,7 +343,7 @@ impl<'c> Parser<'c> {
                             Callable::ExcType(exc_type)
                         } else {
                             // Name will be looked up in the namespace at runtime
-                            let ident = Identifier::new(name, self.convert_range(range));
+                            let ident = self.identifier_from_range(range);
                             Callable::Name(ident)
                         };
                         Ok(ExprLoc::new(position, Expr::Call { callable, args }))
@@ -356,7 +420,7 @@ impl<'c> Parser<'c> {
                 } else if let Ok(exc_type) = name.parse::<ExcType>() {
                     Expr::Callable(Callable::ExcType(exc_type))
                 } else {
-                    Expr::Name(Identifier::new(name, position))
+                    Expr::Name(self.identifier_from_range(range))
                 };
                 Ok(ExprLoc::new(position, expr))
             }
@@ -383,7 +447,7 @@ impl<'c> Parser<'c> {
 
     fn parse_kwargs(&self, kwarg: Keyword) -> Result<Kwarg<'c>, ParseError<'c>> {
         let key = match kwarg.arg {
-            Some(key) => self.identifier_from_node(key),
+            Some(key) => self.identifier_from_range(key.range),
             None => return Err(ParseError::Todo("kwargs with no key")),
         };
         let value = self.parse_expression(kwarg.value)?;
@@ -392,15 +456,13 @@ impl<'c> Parser<'c> {
 
     fn parse_identifier(&self, ast: AstExpr) -> Result<Identifier<'c>, ParseError<'c>> {
         match ast {
-            AstExpr::Name(ast::ExprName { id, range, .. }) => {
-                Ok(Identifier::new(id.to_string(), self.convert_range(range)))
-            }
+            AstExpr::Name(ast::ExprName { range, .. }) => Ok(self.identifier_from_range(range)),
             other => Err(ParseError::Internal(format!("Expected name, got {other:?}").into())),
         }
     }
 
-    fn identifier_from_node(&self, identifier: ast::Identifier) -> Identifier<'c> {
-        Identifier::new(identifier.id.to_string(), self.convert_range(identifier.range))
+    fn identifier_from_range(&self, range: TextRange) -> Identifier<'c> {
+        Identifier::new(&self.code[range], self.convert_range(range))
     }
 
     fn convert_range(&self, range: TextRange) -> CodeRange<'c> {

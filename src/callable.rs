@@ -39,7 +39,7 @@ impl fmt::Display for Callable<'_> {
                 let type_str: &'static str = (*e).into();
                 f.write_str(type_str)
             }
-            Self::Name(ident) => f.write_str(&ident.name),
+            Self::Name(ident) => f.write_str(ident.name),
         }
     }
 }
@@ -58,13 +58,17 @@ impl<'c> Callable<'c> {
                 // Look up the callable in the namespace and clone it to release the borrow
                 // before making the recursive call that needs `namespace`
                 let callable_obj = namespace_get_mut(namespace, ident)?;
-                if let Object::Callable(callable) = callable_obj {
-                    let callable = callable.clone();
-                    callable.call(namespace, heap, args)
-                } else {
-                    let type_name = callable_obj.py_type(heap);
-                    let err = exc_fmt!(ExcType::TypeError; "'{type_name}' object is not callable");
-                    Err(err.with_position(ident.position).into())
+                match callable_obj {
+                    Object::Callable(callable) => {
+                        let callable = callable.clone();
+                        callable.call(namespace, heap, args)
+                    }
+                    Object::Function(f) => f.call(heap, args),
+                    _ => {
+                        let type_name = callable_obj.py_type(heap);
+                        let err = exc_fmt!(ExcType::TypeError; "'{type_name}' object is not callable");
+                        Err(err.with_position(ident.position).into())
+                    }
                 }
             }
         }
@@ -74,11 +78,11 @@ impl<'c> Callable<'c> {
         Object::Callable(self.clone())
     }
 
-    pub fn py_repr<'a, 'e>(&'a self, _heap: &'a Heap<'c, 'e>) -> Cow<'a, str> {
+    pub fn py_repr<'a, 'e>(&'a self, heap: &'a Heap<'c, 'e>) -> Cow<'a, str> {
         match self {
             Self::Builtin(b) => format!("<built-in function {}>", b.as_ref()).into(),
             Self::ExcType(e) => format!("<class '{}'>", <&'static str>::from(*e)).into(),
-            Self::Name(_) => todo!(),
+            Self::Name(name) => heap.get(name.heap_id()).py_repr(heap),
         }
     }
 

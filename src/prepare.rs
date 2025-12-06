@@ -6,7 +6,9 @@ use crate::args::ArgExprs;
 use crate::callable::Callable;
 use crate::exceptions::{ExcType, ExceptionRaise, SimpleException};
 use crate::expressions::{Expr, ExprLoc, Identifier, Literal, Node};
+use crate::function::Function;
 use crate::operators::{CmpOperator, Operator};
+use crate::parse::ParseNode;
 use crate::parse_error::ParseError;
 
 /// Result of the prepare phase, containing everything needed to execute code.
@@ -30,7 +32,10 @@ pub(crate) struct PrepareResult<'c> {
 /// Prepares parsed nodes for execution by resolving names and building the initial namespace.
 ///
 /// The namespace will be converted to runtime Objects when execution begins and the heap is available.
-pub(crate) fn prepare<'c>(nodes: Vec<Node<'c>>, input_names: &[&str]) -> Result<PrepareResult<'c>, ParseError<'c>> {
+pub(crate) fn prepare<'c>(
+    nodes: Vec<ParseNode<'c>>,
+    input_names: &[&str],
+) -> Result<PrepareResult<'c>, ParseError<'c>> {
     let mut p = Prepare::new(nodes.len(), input_names, true);
     let prepared_nodes = p.prepare_nodes(nodes)?;
     Ok(PrepareResult {
@@ -91,13 +96,13 @@ impl Prepare {
     ///
     /// # Returns
     /// A vector of prepared nodes ready for execution
-    fn prepare_nodes<'c>(&mut self, nodes: Vec<Node<'c>>) -> Result<Vec<Node<'c>>, ParseError<'c>> {
+    fn prepare_nodes<'c>(&mut self, nodes: Vec<ParseNode<'c>>) -> Result<Vec<Node<'c>>, ParseError<'c>> {
         let nodes_len = nodes.len();
         let mut new_nodes = Vec::with_capacity(nodes_len);
         for (index, node) in nodes.into_iter().enumerate() {
             match node {
-                Node::Pass => (),
-                Node::Expr(expr) => {
+                ParseNode::Pass => (),
+                ParseNode::Expr(expr) => {
                     let expr = self.prepare_expression(expr)?;
                     // In the root frame (global scope), the last expression is implicitly returned
                     // if it's not None. This matches Python REPL behavior where the last expression
@@ -108,12 +113,12 @@ impl Prepare {
                         new_nodes.push(Node::Expr(expr));
                     }
                 }
-                Node::Return(expr) => {
+                ParseNode::Return(expr) => {
                     let expr = self.prepare_expression(expr)?;
                     new_nodes.push(Node::Return(expr));
                 }
-                Node::ReturnNone => new_nodes.push(Node::ReturnNone),
-                Node::Raise(exc) => {
+                ParseNode::ReturnNone => new_nodes.push(Node::ReturnNone),
+                ParseNode::Raise(exc) => {
                     let expr = match exc {
                         Some(expr) => {
                             match expr.expr {
@@ -142,9 +147,11 @@ impl Prepare {
                                     // Name will be looked up in the namespace at runtime
                                     let (resolved_id, is_new) = self.get_id(id);
                                     if is_new {
-                                        let exc: ExceptionRaise =
-                                            SimpleException::new(ExcType::NameError, Some(resolved_id.name.into()))
-                                                .into();
+                                        let exc: ExceptionRaise = SimpleException::new(
+                                            ExcType::NameError,
+                                            Some(resolved_id.name.to_owned().into()),
+                                        )
+                                        .into();
                                         return Err(exc.into());
                                     }
                                     let call_expr = Expr::Call {
@@ -160,23 +167,23 @@ impl Prepare {
                     };
                     new_nodes.push(Node::Raise(expr));
                 }
-                Node::Assign { target, object } => {
+                ParseNode::Assign { target, object } => {
                     let object = self.prepare_expression(object)?;
                     let (target, _) = self.get_id(target);
                     new_nodes.push(Node::Assign { target, object });
                 }
-                Node::OpAssign { target, op, object } => {
+                ParseNode::OpAssign { target, op, object } => {
                     let target = self.get_id(target).0;
                     let object = self.prepare_expression(object)?;
                     new_nodes.push(Node::OpAssign { target, op, object });
                 }
-                Node::SubscriptAssign { target, index, value } => {
+                ParseNode::SubscriptAssign { target, index, value } => {
                     let target = self.get_id(target).0;
                     let index = self.prepare_expression(index)?;
                     let value = self.prepare_expression(value)?;
                     new_nodes.push(Node::SubscriptAssign { target, index, value });
                 }
-                Node::For {
+                ParseNode::For {
                     target,
                     iter,
                     body,
@@ -189,11 +196,15 @@ impl Prepare {
                         or_else: self.prepare_nodes(or_else)?,
                     });
                 }
-                Node::If { test, body, or_else } => {
+                ParseNode::If { test, body, or_else } => {
                     let test = self.prepare_expression(test)?;
                     let body = self.prepare_nodes(body)?;
                     let or_else = self.prepare_nodes(or_else)?;
                     new_nodes.push(Node::If { test, body, or_else });
+                }
+                ParseNode::FunctionDef { name, params, body } => {
+                    let func_node = self.prepare_function_def(name, params, body)?;
+                    new_nodes.push(func_node);
                 }
             }
         }
@@ -239,7 +250,8 @@ impl Prepare {
                         // Calling an undefined variable should fail at prepare-time, not runtime.
                         if is_new {
                             let exc: ExceptionRaise =
-                                SimpleException::new(ExcType::NameError, Some(resolved_ident.name.into())).into();
+                                SimpleException::new(ExcType::NameError, Some(resolved_ident.name.to_owned().into()))
+                                    .into();
                             return Err(exc.into());
                         }
                         Callable::Name(resolved_ident)
@@ -255,7 +267,8 @@ impl Prepare {
                 // Calling a method on an undefined variable should fail at prepare-time, not runtime.
                 // Example: `undefined_var.method()` should raise NameError here.
                 if is_new {
-                    let exc: ExceptionRaise = SimpleException::new(ExcType::NameError, Some(object.name.into())).into();
+                    let exc: ExceptionRaise =
+                        SimpleException::new(ExcType::NameError, Some(object.name.to_owned().into())).into();
                     return Err(exc.into());
                 }
                 args.prepare_args(|expr| self.prepare_expression(expr))?;
@@ -321,6 +334,29 @@ impl Prepare {
         Ok(ExprLoc { position, expr })
     }
 
+    /// Prepares a function definition by analyzing closures and building a FunctionDef.
+    fn prepare_function_def<'c>(
+        &mut self,
+        name: Identifier<'c>,
+        params: Vec<&'c str>,
+        body: Vec<ParseNode<'c>>,
+    ) -> Result<Node<'c>, ParseError<'c>> {
+        let (name, _) = self.get_id(name);
+
+        // Create child preparer for function body
+        let mut prepare = Prepare::new(body.len(), &params, false);
+        // Prepare the function body
+        let prepared_body = prepare.prepare_nodes(body)?;
+
+        // Return the final FunctionDef node
+        Ok(Node::FunctionDef(Function::new(
+            name,
+            params,
+            prepared_body,
+            prepare.namespace_size,
+        )))
+    }
+
     /// Resolves an identifier to its namespace index, creating a new entry if needed.
     ///
     /// This is the core name resolution mechanism. If the name already exists in the name_map,
@@ -331,7 +367,7 @@ impl Prepare {
     /// A tuple of (resolved Identifier with id set, whether this is a new name).
     /// The boolean is true if this name was just added to the namespace.
     fn get_id<'c>(&mut self, ident: Identifier<'c>) -> (Identifier<'c>, bool) {
-        let (id, is_new) = match self.name_map.entry(ident.name.clone()) {
+        let (id, is_new) = match self.name_map.entry(ident.name.to_owned()) {
             Entry::Occupied(e) => {
                 let id = e.get();
                 (*id, false)
@@ -344,13 +380,6 @@ impl Prepare {
                 (id, true)
             }
         };
-        (
-            Identifier {
-                name: ident.name,
-                heap_id: Some(id),
-                position: ident.position,
-            },
-            is_new,
-        )
+        (Identifier::new_with_heap(ident.name, ident.position, id), is_new)
     }
 }

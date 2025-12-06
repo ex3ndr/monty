@@ -191,12 +191,12 @@ impl ExcType {
 ///
 /// This is used for performance reasons for common exception patterns.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SimpleException {
+pub struct SimpleException<'c> {
     exc_type: ExcType,
-    arg: Option<Cow<'static, str>>,
+    arg: Option<Cow<'c, str>>,
 }
 
-impl fmt::Display for SimpleException {
+impl fmt::Display for SimpleException<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let type_str: &'static str = self.exc_type.into();
         write!(f, "{type_str}(")?;
@@ -209,10 +209,10 @@ impl fmt::Display for SimpleException {
     }
 }
 
-impl SimpleException {
+impl<'c> SimpleException<'c> {
     /// Creates a new exception with the given type and optional argument message.
     #[must_use]
-    pub fn new(exc_type: ExcType, arg: Option<Cow<'static, str>>) -> Self {
+    pub fn new(exc_type: ExcType, arg: Option<Cow<'c, str>>) -> Self {
         SimpleException { exc_type, arg }
     }
 
@@ -231,14 +231,14 @@ impl SimpleException {
         hasher.finish()
     }
 
-    pub(crate) fn with_frame(self, frame: StackFrame) -> ExceptionRaise {
+    pub(crate) fn with_frame(self, frame: StackFrame<'c>) -> ExceptionRaise<'c> {
         ExceptionRaise {
             exc: self,
             frame: Some(frame),
         }
     }
 
-    pub(crate) fn with_position(self, position: CodeRange) -> ExceptionRaise {
+    pub(crate) fn with_position(self, position: CodeRange<'c>) -> ExceptionRaise<'c> {
         ExceptionRaise {
             exc: self,
             frame: Some(StackFrame::from_position(position)),
@@ -252,7 +252,7 @@ impl SimpleException {
     ///
     /// For other cases, uses the generic format:
     /// `unsupported operand type(s) for {op}: '{left}' and '{right}'`
-    pub(crate) fn operand_type_error<'c, T>(
+    pub(crate) fn operand_type_error<T>(
         left: &ExprLoc<'c>,
         op: &Operator,
         right: &ExprLoc<'c>,
@@ -273,7 +273,7 @@ impl SimpleException {
             .into())
     }
 
-    pub(crate) fn cmp_type_error<'c, T>(
+    pub(crate) fn cmp_type_error<T>(
         left: &ExprLoc<'c>,
         op: &CmpOperator,
         right: &ExprLoc<'c>,
@@ -310,6 +310,7 @@ macro_rules! exc_err_static {
 }
 pub(crate) use exc_err_static;
 
+// TODO remove this, we should always set position before creating the Err
 macro_rules! exc_err_fmt {
     ($error_type:expr; $($fmt_args:tt)*) => {
         Err(crate::exceptions::exc_fmt!($error_type; $($fmt_args)*).into())
@@ -319,7 +320,7 @@ pub(crate) use exc_err_fmt;
 
 #[derive(Debug, Clone)]
 pub struct ExceptionRaise<'c> {
-    pub exc: SimpleException,
+    pub exc: SimpleException<'c>,
     // first in vec is closes "bottom" frame
     pub(crate) frame: Option<StackFrame<'c>>,
 }
@@ -334,8 +335,8 @@ impl fmt::Display for ExceptionRaise<'_> {
     }
 }
 
-impl From<SimpleException> for ExceptionRaise<'_> {
-    fn from(exc: SimpleException) -> Self {
+impl<'c> From<SimpleException<'c>> for ExceptionRaise<'c> {
+    fn from(exc: SimpleException<'c>) -> Self {
         ExceptionRaise { exc, frame: None }
     }
 }
@@ -353,6 +354,7 @@ impl ExceptionRaise<'_> {
 #[derive(Debug, Clone)]
 pub struct StackFrame<'c> {
     pub(crate) position: CodeRange<'c>,
+    /// The name of the frame (function name, or None for module-level code).
     pub(crate) frame_name: Option<&'c str>,
     pub(crate) parent: Option<Box<StackFrame<'c>>>,
 }
@@ -456,8 +458,8 @@ impl<'c> From<ExceptionRaise<'c>> for RunError<'c> {
     }
 }
 
-impl From<SimpleException> for RunError<'_> {
-    fn from(exc: SimpleException) -> Self {
+impl<'c> From<SimpleException<'c>> for RunError<'c> {
+    fn from(exc: SimpleException<'c>) -> Self {
         Self::Exc(exc.into())
     }
 }

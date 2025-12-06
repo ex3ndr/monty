@@ -3,6 +3,7 @@ use std::fmt::{self, Write};
 use crate::args::ArgExprs;
 use crate::callable::Callable;
 use crate::exceptions::ExceptionRaise;
+use crate::function::Function;
 use crate::object::{Attr, Object};
 use crate::operators::{CmpOperator, Operator};
 use crate::parse::CodeRange;
@@ -12,17 +13,29 @@ use crate::values::str::string_repr;
 #[derive(Debug, Clone)]
 pub(crate) struct Identifier<'c> {
     pub position: CodeRange<'c>,
-    pub name: String,
-    pub heap_id: Option<usize>,
+    pub name: &'c str,
+    opt_heap_id: Option<usize>,
 }
 
 impl<'c> Identifier<'c> {
-    pub fn new(name: String, position: CodeRange<'c>) -> Self {
+    pub fn new(name: &'c str, position: CodeRange<'c>) -> Self {
         Self {
             name,
             position,
-            heap_id: None,
+            opt_heap_id: None,
         }
+    }
+
+    pub fn new_with_heap(name: &'c str, position: CodeRange<'c>, heap_id: usize) -> Self {
+        Self {
+            name,
+            position,
+            opt_heap_id: Some(heap_id),
+        }
+    }
+
+    pub fn heap_id(&self) -> usize {
+        self.opt_heap_id.expect("Identifier not prepared with heap_id")
     }
 }
 
@@ -68,7 +81,7 @@ impl fmt::Display for Expr<'_> {
         match self {
             Self::Literal(object) => write!(f, "{object}"),
             Self::Callable(callable) => write!(f, "{callable}"),
-            Self::Name(identifier) => f.write_str(&identifier.name),
+            Self::Name(identifier) => f.write_str(identifier.name),
             Self::Call { callable, args } => write!(f, "{callable}{args}"),
             Self::AttrCall { object, attr, args } => write!(f, "{}.{}{}", object.name, attr, args),
             Self::Op { left, op, right } => write!(f, "{left} {op} {right}"),
@@ -187,7 +200,6 @@ impl<'c> ExprLoc<'c> {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Node<'c> {
-    Pass,
     Expr(ExprLoc<'c>),
     Return(ExprLoc<'c>),
     ReturnNone,
@@ -217,6 +229,7 @@ pub(crate) enum Node<'c> {
         body: Vec<Node<'c>>,
         or_else: Vec<Node<'c>>,
     },
+    FunctionDef(Function<'c>),
 }
 
 #[derive(Debug)]

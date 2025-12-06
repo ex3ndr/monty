@@ -8,6 +8,7 @@ use strum::Display;
 use crate::args::ArgObjects;
 use crate::callable::Callable;
 use crate::exceptions::{exc_err_fmt, ExcType, SimpleException};
+use crate::function::Function;
 use crate::heap::HeapData;
 use crate::heap::{Heap, ObjectId};
 use crate::run::RunResult;
@@ -37,10 +38,13 @@ pub enum Object<'c, 'e> {
     InternString(&'e str),
     InternBytes(&'e [u8]),
     /// Exception instance (e.g., result of `ValueError('msg')`).
-    Exc(SimpleException),
+    Exc(SimpleException<'c>),
     /// Callables, nested enum to make calling easier, allow private until Object is privates
     #[allow(private_interfaces)]
     Callable(Callable<'c>),
+    /// A function defined in the module
+    #[allow(private_interfaces)]
+    Function(&'e Function<'c>),
 
     // Heap-allocated values (stored in arena)
     Ref(ObjectId),
@@ -66,6 +70,7 @@ impl<'c, 'e> PyValue<'c, 'e> for Object<'c, 'e> {
             Self::InternBytes(_) => "bytes",
             Self::Exc(e) => e.type_str(),
             Self::Callable(c) => c.py_type(heap),
+            Self::Function(_) => "function",
             Self::Ref(id) => heap.get(*id).py_type(heap),
         }
     }
@@ -169,6 +174,7 @@ impl<'c, 'e> PyValue<'c, 'e> for Object<'c, 'e> {
             Self::Range(v) => *v != 0,
             Self::Exc(_) => true,
             Self::Callable(_) => true,
+            Self::Function(_) => true,
             Self::InternString(s) => !s.is_empty(),
             Self::InternBytes(b) => !b.is_empty(),
             Self::Ref(id) => heap.get(*id).py_bool(heap),
@@ -194,6 +200,7 @@ impl<'c, 'e> PyValue<'c, 'e> for Object<'c, 'e> {
             Self::Range(size) => format!("0:{size}").into(),
             Self::Exc(exc) => format!("{exc}").into(),
             Self::Callable(c) => c.py_repr(heap),
+            Self::Function(f) => f.py_repr(),
             Self::InternString(s) => string_repr(s).into(),
             Self::InternBytes(b) => bytes_repr(b).into(),
             Self::Ref(id) => heap.get(*id).py_repr(heap),
@@ -402,6 +409,7 @@ impl<'c, 'e> Object<'c, 'e> {
                     singleton_id(SingletonSlot::False)
                 }
             }
+            Self::Function(f) => f.id(),
             Self::InternString(s) => {
                 interned_id_from_parts(s.as_ptr() as usize, s.len(), INTERN_STR_ID_TAG, INTERN_STR_ID_MASK)
             }
@@ -469,6 +477,12 @@ impl<'c, 'e> Object<'c, 'e> {
                 // Builtins have a fixed identity, hash based on variant discriminant
                 let mut hasher = DefaultHasher::new();
                 std::mem::discriminant(c).hash(&mut hasher);
+                Some(hasher.finish())
+            }
+            Self::Function(f) => {
+                let mut hasher = DefaultHasher::new();
+                // TODO, this is NOT proper hashing, we should somehow hash the function properly
+                f.name.name.hash(&mut hasher);
                 Some(hasher.finish())
             }
             Self::InternString(s) => {
@@ -564,6 +578,7 @@ impl<'c, 'e> Object<'c, 'e> {
             Self::Range(v) => Self::Range(*v),
             Self::Exc(e) => Self::Exc(e.clone()),
             Self::Callable(c) => Self::Callable(c.clone()),
+            Self::Function(f) => Self::Function(f),
             Self::InternString(s) => Self::InternString(s),
             Self::InternBytes(b) => Self::InternBytes(b),
             Self::Ref(_) => panic!("Ref clones must go through clone_with_heap to maintain refcounts"),
@@ -589,6 +604,7 @@ impl<'c, 'e> Object<'c, 'e> {
             Self::Range(v) => Self::Range(*v),
             Self::Exc(e) => Self::Exc(e.clone()),
             Self::Callable(c) => Self::Callable(c.clone()),
+            Self::Function(f) => Self::Function(f),
             Self::InternString(s) => Self::InternString(s),
             Self::InternBytes(b) => Self::InternBytes(b),
             Self::Ref(id) => Self::Ref(*id), // Caller must increment refcount!
@@ -681,6 +697,6 @@ const fn singleton_id(slot: SingletonSlot) -> usize {
 
 /// Converts a heap `ObjectId` into its tagged `id()` value, ensuring it never collides with other spaces.
 #[inline]
-fn heap_tagged_id(object_id: ObjectId) -> usize {
+pub fn heap_tagged_id(object_id: ObjectId) -> usize {
     HEAP_OBJECT_ID_TAG | (object_id & HEAP_OBJECT_ID_MASK)
 }

@@ -5,6 +5,7 @@ mod evaluate;
 pub mod exceptions;
 mod exit;
 mod expressions;
+mod function;
 mod heap;
 mod object;
 mod operators;

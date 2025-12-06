@@ -248,14 +248,13 @@ pub fn namespace_get_mut<'c, 'e, 'n>(
     namespace: &'n mut [Object<'c, 'e>],
     ident: &Identifier<'c>,
 ) -> RunResult<'c, &'n mut Object<'c, 'e>> {
-    if let Some(object) = namespace.get_mut(ident.heap_id.unwrap()) {
+    if let Some(object) = namespace.get_mut(ident.heap_id()) {
         match object {
             Object::Undefined => {}
             _ => return Ok(object),
         }
     }
-    let name = ident.name.clone();
-    Err(SimpleException::new(ExcType::NameError, Some(name.into()))
+    Err(SimpleException::new(ExcType::NameError, Some(ident.name.into()))
         .with_position(ident.position)
         .into())
 }

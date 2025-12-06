@@ -335,6 +335,11 @@ fn run_cpython_test(path: &Path, code: &str, expectation: &Expectation) {
                     .and_then(pyo3::PyAny::extract)
                     .unwrap_or_default();
 
+                // Normalize function names: CPython shows "__test__.<locals>.f()" for functions
+                // defined inside the test wrapper, but Monty shows just "f()". Strip the prefix
+                // so both can use the same expectation.
+                let exc_message = exc_message.replace("__test__.<locals>.", "");
+
                 if exc_message.is_empty() {
                     format!("{exc_type}()")
                 } else if exc_message.contains('\'') {

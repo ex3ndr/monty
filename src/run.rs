@@ -1,6 +1,7 @@
 use crate::evaluate::{evaluate_bool, evaluate_discard, evaluate_use, namespace_get_mut};
 use crate::exceptions::{exc_err_static, exc_fmt, internal_err, ExcType, InternalRunError, RunError, StackFrame};
 use crate::expressions::{ExprLoc, FrameExit, Identifier, Node};
+use crate::function::Function;
 use crate::heap::Heap;
 use crate::object::Object;
 use crate::operators::Operator;
@@ -13,6 +14,7 @@ pub type RunResult<'c, T> = Result<T, RunError<'c>>;
 pub(crate) struct RunFrame<'c, 'e> {
     namespace: Vec<Object<'c, 'e>>,
     parent: Option<StackFrame<'c>>,
+    /// The name of the current frame (function name or "<module>").
     name: &'c str,
 }
 
@@ -25,6 +27,15 @@ where
             namespace,
             parent: None,
             name: "<module>",
+        }
+    }
+
+    /// Creates a new frame for function execution with captured closure cells.
+    pub fn new_for_function(namespace: Vec<Object<'c, 'e>>, name: &'c str, parent: Option<StackFrame<'c>>) -> Self {
+        Self {
+            namespace,
+            parent,
+            name,
         }
     }
 
@@ -51,7 +62,6 @@ where
         node: &'e Node<'c>,
     ) -> RunResult<'c, Option<FrameExit<'c, 'e>>> {
         match node {
-            Node::Pass => return internal_err!(InternalRunError::Error; "Unexpected `pass` in execution"),
             Node::Expr(expr) => {
                 if let Err(mut e) = evaluate_discard(&mut self.namespace, heap, expr) {
                     set_name(self.name, &mut e);
@@ -61,12 +71,8 @@ where
             Node::Return(expr) => return Ok(Some(FrameExit::Return(self.execute_expr(heap, expr)?))),
             Node::ReturnNone => return Ok(Some(FrameExit::Return(Object::None))),
             Node::Raise(exc) => self.raise(heap, exc.as_ref())?,
-            Node::Assign { target, object } => {
-                self.assign(heap, target, object)?;
-            }
-            Node::OpAssign { target, op, object } => {
-                self.op_assign(heap, target, op, object)?;
-            }
+            Node::Assign { target, object } => self.assign(heap, target, object)?,
+            Node::OpAssign { target, op, object } => self.op_assign(heap, target, op, object)?,
             Node::SubscriptAssign { target, index, value } => {
                 self.subscript_assign(heap, target, index, value)?;
             }
@@ -77,6 +83,7 @@ where
                 or_else,
             } => self.for_loop(heap, target, iter, body, or_else)?,
             Node::If { test, body, or_else } => self.if_(heap, test, body, or_else)?,
+            Node::FunctionDef(function) => self.define_function(heap, function),
         }
         Ok(None)
     }
@@ -121,7 +128,7 @@ where
         expr: &'e ExprLoc<'c>,
     ) -> RunResult<'c, ()> {
         let new_value = self.execute_expr(heap, expr)?;
-        let old_value = std::mem::replace(&mut self.namespace[target.heap_id.unwrap()], new_value);
+        let old_value = std::mem::replace(&mut self.namespace[target.heap_id()], new_value);
         if let Object::Ref(object_id) = old_value {
             heap.dec_ref(object_id);
         }
@@ -184,7 +191,7 @@ where
         };
 
         for object in 0i64..range_size {
-            self.namespace[target.heap_id.unwrap()] = Object::Int(object);
+            self.namespace[target.heap_id()] = Object::Int(object);
             self.execute(heap, body)?;
         }
         Ok(())
@@ -203,6 +210,13 @@ where
             self.execute(heap, or_else)?;
         }
         Ok(())
+    }
+
+    fn define_function(&mut self, heap: &mut Heap<'c, 'e>, function: &'e Function<'c>) {
+        let old_value = std::mem::replace(&mut self.namespace[function.name.heap_id()], Object::Function(function));
+        if let Object::Ref(object_id) = old_value {
+            heap.dec_ref(object_id);
+        }
     }
 
     fn stack_frame(&self, position: &CodeRange<'c>) -> StackFrame<'c> {
