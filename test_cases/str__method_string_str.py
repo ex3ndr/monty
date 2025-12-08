@@ -1,2 +1,0 @@
-"hello"
-# Return.str=hello

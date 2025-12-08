@@ -1,2 +1,0 @@
-True
-# Return.type=bool

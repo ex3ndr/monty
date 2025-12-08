@@ -1,2 +1,0 @@
-not None
-# Return=True

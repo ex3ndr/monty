@@ -1,2 +1,0 @@
-[] is []
-# Return=False

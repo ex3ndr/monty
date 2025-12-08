@@ -1,2 +1,0 @@
-assert True
-# Return=None

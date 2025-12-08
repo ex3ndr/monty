@@ -67,41 +67,76 @@ cargo build
 make test
 
 # Run a specific test
-cargo test --features dec-ref-check execute_ok_add_ints
+cargo test --features dec-ref-check str__ops
 
 # Run the interpreter on a Python file
 cargo run -- <file.py>
 ```
 
-Tests should always be as concise as possible while covering all possible cases.
+### Test File Structure
 
-All Python execution behavior tests use file-based fixtures in `test_cases/`. File names: `<group_name>__<test_name>.py`. Unless it's completely obvious what is being tested, add short comments to the test code.
+**DO NOT create many small test files.** This would be unmaintainable.
 
-You may test behavior using multiple `assert` statements per file to avoid many small files, unless you're testing `assert` behavior, always add a message to the assert statement.
+ALWAYS consolidate related tests into single files*using multiple `assert` statements. Follow `test_cases/fstring__all.py` as the gold standard pattern:
 
-You should prefer single quotes for strings in python tests.
+```python
+# === Section name ===
+# brief comment if needed
+assert condition, 'descriptive message'
+assert another_condition, 'another descriptive message'
 
-**Expectation formats** (on last line of file):
-- `# Return=value` - Check `repr()` output
-- `# Return.str=value` - Check `str()` output
-- `# Return.type=typename` - Check `type()` output
-- `# Raise=Exception('message')` - Expect exception
-- `# ParseError=message` - Expect parse error
-- `# ref-counts={...}` - To check reference counts of heap-allocated values
-- No expectation comment - Just verify code runs without exception (useful for assert-based tests)
+# === Next section ===
+x = setup_value
+assert x == expected, 'test description'
+```
 
-**Skip directive** (optional, on first line of file):
+Each `assert` should have a descriptive message.
+
+### When to Create Separate Test Files
+
+Only create a separate test file when you MUST use one of these special expectation formats:
+
+- `# Raise=Exception('message')` - Test expects an exception (execution stops)
+- `# ParseError=message` - Test expects a parse error
+- `# ref-counts={...}` - Test checks reference counts (special mode)
+- you're writing tests for a different behavior or section of the language
+
+For everything else, **add asserts to an existing test file** or create ONE consolidated file for the feature.
+
+### File Naming
+
+Name files by feature, not by micro-variant:
+- ✅ `str__ops.py` - all string operations (add, iadd, len, etc.)
+- ✅ `list__methods.py` - all list method tests
+- ❌ `str__add_basic.py`, `str__add_empty.py`, `str__add_multiple.py` - TOO GRANULAR
+
+### Expectation Formats (use sparingly)
+
+Only use these when `assert` won't work (on last line of file):
+- `# Return=value` - Check `repr()` output (prefer assert instead)
+- `# Return.str=value` - Check `str()` output (prefer assert instead)
+- `# Return.type=typename` - Check `type()` output (prefer assert instead)
+- `# Raise=Exception('message')` - Expect exception (REQUIRES separate file)
+- `# ParseError=message` - Expect parse error (REQUIRES separate file)
+- `# ref-counts={...}` - Check reference counts (REQUIRES separate file)
+- No expectation comment - Assert-based test (PREFERRED)
+
+Do NOT use `# Return=` when you could use `assert` instead
+
+### Skip Directive
+
+Optional, on first line of file - DO NOT use unless absolutely necessary:
 - `# skip=cpython` - Skip CPython test (only run on Monty)
 - `# skip=monty` - Skip Monty test (only run on CPython)
-- `# skip=monty,cpython` - Skip both (useful for temporarily disabling a test)
 
-DO NOT use `skip` unless absolutely necessary, ask for approval before using `skip`!
+Ask for approval before using `skip`!
 
-Run `make lint-py` after adding tests to lint them, you may need to disable some linting rules by editing `pyproject.toml` to allow all syntax in the test files.
+### Other Notes
 
-Use `make complete-tests` after adding tests with the expectations blank e.g. `# Return=` to fill in the expected value.
-
-These tests are run via `datatest-stable` harness in `tests/datatest_runner.rs`.
+- Prefer single quotes for strings in Python tests
+- Run `make lint-py` after adding tests
+- Use `make complete-tests` to fill in blank expectations
+- Tests run via `datatest-stable` harness in `tests/datatest_runner.rs`
 
 ## Reference Counting
 

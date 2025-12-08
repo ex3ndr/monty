@@ -35,6 +35,7 @@ ignore = [
     "F632", # ignore replace `is` with `==` - we have lots of these tests
     "F811", # Redefinition of unused variable
     "F541", # f-string without any placeholders
+    "E712", # Comparison to True/False - needed for testing boolean behavior
 ]
 
 [tool.ruff.format]
