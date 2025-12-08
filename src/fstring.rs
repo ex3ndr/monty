@@ -8,15 +8,14 @@ use std::borrow::Cow;
 use std::fmt::{self, Write};
 use std::str::FromStr;
 
-use crate::evaluate::evaluate_use;
+use crate::evaluate::EvaluateExpr;
 use crate::exceptions::{exc_fmt, ExcType};
 use crate::expressions::ExprLoc;
 use crate::heap::{Heap, HeapData};
-use crate::namespace::Namespaces;
 use crate::resource::ResourceTracker;
 use crate::run::RunResult;
 use crate::value::Value;
-use crate::values::{PyTrait, Str};
+use crate::values::PyTrait;
 
 // ============================================================================
 // F-string type definitions
@@ -313,78 +312,66 @@ impl ValueType {
     }
 }
 
-/// Evaluates an f-string by processing its parts sequentially.
+/// Processes a single f-string interpolation, appending the result to the output string.
 ///
-/// Each part is either:
-/// - Literal: Appended directly to the result
-/// - Interpolation: Evaluate expression, apply conversion, apply format spec
+/// This function handles:
+/// 1. Evaluating the expression
+/// 2. Applying conversion flags (!s, !r, !a)
+/// 3. Applying format specifications (static or dynamic)
+/// 4. Appending the formatted result to the output
 ///
-/// Reference counting: Intermediate string values are heap-allocated and must
-/// be properly dropped after concatenation. The final result is a new heap string.
-pub(crate) fn evaluate_fstring<'c, 'e, T: ResourceTracker>(
-    namespaces: &mut Namespaces<'c, 'e>,
-    local_idx: usize,
-    heap: &mut Heap<'c, 'e, T>,
-    parts: &'e [FStringPart<'c>],
-) -> RunResult<'c, Value<'c, 'e>> {
-    let mut result = String::new();
+/// # Arguments
+/// * `evaluator` - The evaluator instance for expression evaluation
+/// * `result` - The output string to append to
+/// * `value` - The evaluated expression value
+/// * `conversion` - The conversion flag to apply
+/// * `format_spec` - Optional format specification
+///
+/// # Returns
+/// `Ok(())` on success, or an error if formatting fails.
+/// The caller is responsible for dropping `value` after this function returns.
+pub(crate) fn fstring_interpolation<'c, 'e, T: ResourceTracker>(
+    evaluator: &mut EvaluateExpr<'c, 'e, '_, T>,
+    result: &mut String,
+    value: &Value<'c, 'e>,
+    conversion: ConversionFlag,
+    format_spec: Option<&'e FormatSpec<'c>>,
+) -> RunResult<'c, ()> {
+    // 1. Get the value type for format spec validation
+    // When a conversion flag is used (!s, !r, !a), the result is always a string,
+    // so we should validate against String type, not the original value type.
+    let value_type = if conversion == ConversionFlag::None {
+        ValueType::from_value(value, evaluator.heap())
+    } else {
+        ValueType::String
+    };
 
-    for part in parts {
-        match part {
-            FStringPart::Literal(s) => result.push_str(s),
-            FStringPart::Interpolation {
-                expr,
-                conversion,
-                format_spec,
-            } => {
-                // 1. Evaluate the expression
-                let value = evaluate_use(namespaces, local_idx, heap, expr)?;
+    // 2. Apply conversion flag (str, repr, ascii)
+    // TODO this is really ugly we go value -> str -> parse the string to see if it's numeric!
+    let converted = apply_conversion(value, conversion, evaluator.heap());
 
-                // 2. Get the value type for format spec validation
-                // When a conversion flag is used (!s, !r, !a), the result is always a string,
-                // so we should validate against String type, not the original value type.
-                let value_type = if *conversion == ConversionFlag::None {
-                    ValueType::from_value(&value, heap)
+    // 3. Apply format specification if present
+    if let Some(spec) = format_spec {
+        match spec {
+            FormatSpec::Static(parsed) => {
+                // Pre-parsed at parse time - use directly
+                apply_format_spec(result, &converted, parsed, value_type)?;
+            }
+            FormatSpec::Dynamic(parts) => {
+                // Evaluate dynamic parts, then parse
+                let spec_str = evaluate_dynamic_format_spec(evaluator, parts)?;
+                if let Ok(parsed) = spec_str.parse() {
+                    apply_format_spec(result, &converted, &parsed, value_type)?;
                 } else {
-                    ValueType::String
-                };
-
-                // 3. Apply conversion flag (str, repr, ascii)
-                // TODO this is really ugly we go value -> str -> parse the string to see if it's numeric!
-                let converted = apply_conversion(&value, *conversion, heap);
-
-                // 4. Apply format specification if present
-                if let Some(spec) = format_spec {
-                    match spec {
-                        FormatSpec::Static(parsed) => {
-                            // Pre-parsed at parse time - use directly
-                            apply_format_spec(&mut result, &converted, parsed, value_type)?;
-                        }
-                        FormatSpec::Dynamic(parts) => {
-                            // Evaluate dynamic parts, then parse
-                            let spec_str = evaluate_dynamic_format_spec(namespaces, local_idx, heap, parts)?;
-                            if let Ok(parsed) = spec_str.parse() {
-                                apply_format_spec(&mut result, &converted, &parsed, value_type)?;
-                            } else {
-                                let err = invalid_format_spec_error(&spec_str, value_type);
-                                value.drop_with_heap(heap);
-                                return Err(err.into());
-                            }
-                        }
-                    }
-                } else {
-                    result.push_str(&converted);
+                    return Err(invalid_format_spec_error(&spec_str, value_type).into());
                 }
-
-                // 5. Drop the evaluated value (important for reference counting)
-                value.drop_with_heap(heap);
             }
         }
+    } else {
+        result.push_str(&converted);
     }
 
-    // Allocate result string on heap
-    let heap_id = heap.allocate(HeapData::Str(Str::new(result)))?;
-    Ok(Value::Ref(heap_id))
+    Ok(())
 }
 
 /// Applies a conversion flag to a value, returning the string representation.
@@ -414,9 +401,7 @@ fn apply_conversion<'c, 'e, T: ResourceTracker>(
 /// Evaluates each part and concatenates the results into a format spec string,
 /// which is then parsed into a `ParsedFormatSpec` at runtime.
 fn evaluate_dynamic_format_spec<'c, 'e, T: ResourceTracker>(
-    namespaces: &mut Namespaces<'c, 'e>,
-    local_idx: usize,
-    heap: &mut Heap<'c, 'e, T>,
+    evaluator: &mut EvaluateExpr<'c, 'e, '_, T>,
     parts: &'e [FStringPart<'c>],
 ) -> RunResult<'c, String> {
     let mut result = String::new();
@@ -424,10 +409,10 @@ fn evaluate_dynamic_format_spec<'c, 'e, T: ResourceTracker>(
         match part {
             FStringPart::Literal(s) => result.push_str(s),
             FStringPart::Interpolation { expr, conversion, .. } => {
-                let value = evaluate_use(namespaces, local_idx, heap, expr)?;
-                let converted = apply_conversion(&value, *conversion, heap);
+                let value = evaluator.evaluate_use(expr)?;
+                let converted = apply_conversion(&value, *conversion, evaluator.heap());
                 result.push_str(&converted);
-                value.drop_with_heap(heap);
+                value.drop_with_heap(evaluator.heap());
             }
         }
     }

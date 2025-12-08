@@ -1,5 +1,5 @@
 use crate::args::ArgValues;
-use crate::evaluate::{evaluate_bool, evaluate_discard, evaluate_use};
+use crate::evaluate::EvaluateExpr;
 use crate::exceptions::{
     exc_err_static, exc_fmt, internal_err, ExcType, InternalRunError, RunError, SimpleException, StackFrame,
 };
@@ -114,7 +114,7 @@ impl<'c> RunFrame<'c> {
     {
         match node {
             Node::Expr(expr) => {
-                if let Err(mut e) = evaluate_discard(namespaces, self.local_idx, heap, expr) {
+                if let Err(mut e) = EvaluateExpr::new(namespaces, self.local_idx, heap).evaluate_discard(expr) {
                     set_name(self.name, &mut e);
                     return Err(e);
                 }
@@ -149,7 +149,7 @@ impl<'c> RunFrame<'c> {
     where
         'c: 'e,
     {
-        match evaluate_use(namespaces, self.local_idx, heap, expr) {
+        match EvaluateExpr::new(namespaces, self.local_idx, heap).evaluate_use(expr) {
             Ok(value) => Ok(value),
             Err(mut e) => {
                 set_name(self.name, &mut e);
@@ -167,7 +167,7 @@ impl<'c> RunFrame<'c> {
     where
         'c: 'e,
     {
-        match evaluate_bool(namespaces, self.local_idx, heap, expr) {
+        match EvaluateExpr::new(namespaces, self.local_idx, heap).evaluate_bool(expr) {
             Ok(value) => Ok(value),
             Err(mut e) => {
                 set_name(self.name, &mut e);
