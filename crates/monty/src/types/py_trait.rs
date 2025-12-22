@@ -15,6 +15,7 @@ use ahash::AHashSet;
 use crate::args::ArgValues;
 use crate::exceptions::ExcType;
 
+use super::Type;
 use crate::heap::{Heap, HeapId};
 use crate::intern::Interns;
 use crate::resource::ResourceTracker;
@@ -38,7 +39,7 @@ pub trait PyTrait {
     ///
     /// Used for error messages and the `type()` builtin.
     /// Takes heap reference for cases where nested Value lookups are needed.
-    fn py_type(&self, heap: Option<&Heap<impl ResourceTracker>>) -> &'static str;
+    fn py_type(&self, heap: Option<&Heap<impl ResourceTracker>>) -> Type;
 
     /// Returns the number of elements in this container.
     ///

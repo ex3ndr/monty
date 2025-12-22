@@ -4,12 +4,13 @@ use ahash::AHashSet;
 
 use crate::args::ArgValues;
 use crate::exceptions::ExcType;
+use crate::types::Type;
 
+use super::PyTrait;
 use crate::heap::{Heap, HeapData, HeapId};
 use crate::intern::Interns;
 use crate::resource::ResourceTracker;
 use crate::run_frame::RunResult;
-use crate::types::PyTrait;
 use crate::value::{Attr, Value};
 
 /// Python list type, wrapping a Vec of Values.
@@ -105,6 +106,91 @@ impl List {
             self.0.insert(index, item);
         }
     }
+
+    /// Creates a list from the `list()` constructor call.
+    ///
+    /// - `list()` with no args returns an empty list
+    /// - `list(list)` returns a shallow copy of the list
+    /// - `list(tuple)` converts the tuple to a list
+    /// - `list(range)` creates a list from the range
+    ///
+    /// Note: Full Python semantics support any iterable.
+    pub fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, interns: &Interns) -> RunResult<Value> {
+        let value = args.get_zero_one_arg("list")?;
+        match value {
+            None => {
+                let heap_id = heap.allocate(HeapData::List(List::new(Vec::new())))?;
+                Ok(Value::Ref(heap_id))
+            }
+            Some(v) => {
+                let result = match &v {
+                    Value::Range(range) => {
+                        // Create list from range values
+                        let items: Vec<Value> = range.iter().map(Value::Int).collect();
+                        heap.allocate(HeapData::List(List::new(items)))
+                    }
+                    Value::Ref(id) => {
+                        let id = *id;
+                        // Extract items based on type, copy without refcount increment
+                        let (items, is_str): (Option<Vec<Value>>, Option<String>) = match heap.get(id) {
+                            HeapData::List(list) => {
+                                let items = list.as_vec().iter().map(Value::copy_for_extend).collect();
+                                (Some(items), None)
+                            }
+                            HeapData::Tuple(tuple) => {
+                                let items = tuple.as_vec().iter().map(Value::copy_for_extend).collect();
+                                (Some(items), None)
+                            }
+                            HeapData::Str(s) => (None, Some(s.as_str().to_owned())),
+                            _ => {
+                                let err = ExcType::type_error_not_iterable(v.py_type(Some(heap)));
+                                v.drop_with_heap(heap);
+                                return Err(err);
+                            }
+                        };
+
+                        if let Some(items) = items {
+                            // Increment refcounts for copied items
+                            for item in &items {
+                                if let Value::Ref(item_id) = item {
+                                    heap.inc_ref(*item_id);
+                                }
+                            }
+                            heap.allocate(HeapData::List(List::new(items)))
+                        } else if let Some(s) = is_str {
+                            // list('abc') -> ['a', 'b', 'c']
+                            let mut items = Vec::new();
+                            for c in s.chars() {
+                                let char_str = c.to_string();
+                                let char_id = heap.allocate(HeapData::Str(char_str.into()))?;
+                                items.push(Value::Ref(char_id));
+                            }
+                            heap.allocate(HeapData::List(List::new(items)))
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                    Value::InternString(string_id) => {
+                        let s = interns.get_str(*string_id);
+                        let mut items = Vec::new();
+                        for c in s.chars() {
+                            let char_str = c.to_string();
+                            let id = heap.allocate(HeapData::Str(char_str.into()))?;
+                            items.push(Value::Ref(id));
+                        }
+                        heap.allocate(HeapData::List(List::new(items)))
+                    }
+                    _ => {
+                        let err = ExcType::type_error_not_iterable(v.py_type(Some(heap)));
+                        v.drop_with_heap(heap);
+                        return Err(err);
+                    }
+                };
+                v.drop_with_heap(heap);
+                Ok(Value::Ref(result?))
+            }
+        }
+    }
 }
 
 impl From<List> for Vec<Value> {
@@ -114,8 +200,8 @@ impl From<List> for Vec<Value> {
 }
 
 impl PyTrait for List {
-    fn py_type(&self, _heap: Option<&Heap<impl ResourceTracker>>) -> &'static str {
-        "list"
+    fn py_type(&self, _heap: Option<&Heap<impl ResourceTracker>>) -> Type {
+        Type::List
     }
 
     fn py_estimate_size(&self) -> usize {
@@ -130,7 +216,7 @@ impl PyTrait for List {
         // Extract integer index from key, returning TypeError if not an int
         let index = match key {
             Value::Int(i) => *i,
-            _ => return Err(ExcType::type_error_indices("list", key.py_type(Some(heap)))),
+            _ => return Err(ExcType::type_error_indices(Type::List, key.py_type(Some(heap)))),
         };
 
         // Convert to usize, handling negative indices (Python-style: -1 = last element)
@@ -242,7 +328,7 @@ impl PyTrait for List {
                 self.insert(heap, index, item);
                 Ok(Value::None)
             }
-            _ => Err(ExcType::attribute_error("list", attr)),
+            _ => Err(ExcType::attribute_error(Type::List, attr)),
         }
     }
 }

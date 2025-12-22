@@ -7,10 +7,13 @@ use std::fmt::Write;
 
 use ahash::AHashSet;
 
+use super::PyTrait;
+use crate::args::ArgValues;
 use crate::heap::{Heap, HeapData, HeapId};
 use crate::intern::Interns;
 use crate::resource::ResourceTracker;
-use crate::types::PyTrait;
+use crate::run_frame::RunResult;
+use crate::types::Type;
 use crate::value::Value;
 
 /// Python string value stored on the heap.
@@ -36,6 +39,26 @@ impl Str {
     /// Returns a mutable reference to the inner string.
     pub fn as_string_mut(&mut self) -> &mut String {
         &mut self.0
+    }
+
+    /// Creates a string from the `str()` constructor call.
+    ///
+    /// - `str()` with no args returns an empty string
+    /// - `str(x)` converts x to its string representation using `py_str`
+    pub fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, interns: &Interns) -> RunResult<Value> {
+        let value = args.get_zero_one_arg("str")?;
+        match value {
+            None => {
+                let heap_id = heap.allocate(HeapData::Str(Str::new(String::new())))?;
+                Ok(Value::Ref(heap_id))
+            }
+            Some(v) => {
+                let s = v.py_str(heap, interns).into_owned();
+                let heap_id = heap.allocate(HeapData::Str(Str::new(s)))?;
+                v.drop_with_heap(heap);
+                Ok(Value::Ref(heap_id))
+            }
+        }
     }
 }
 
@@ -66,8 +89,8 @@ impl std::ops::Deref for Str {
 }
 
 impl PyTrait for Str {
-    fn py_type(&self, _heap: Option<&Heap<impl ResourceTracker>>) -> &'static str {
-        "str"
+    fn py_type(&self, _heap: Option<&Heap<impl ResourceTracker>>) -> Type {
+        Type::Str
     }
 
     fn py_estimate_size(&self) -> usize {

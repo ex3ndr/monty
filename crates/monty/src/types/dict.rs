@@ -5,12 +5,13 @@ use indexmap::IndexMap;
 
 use crate::args::ArgValues;
 use crate::exceptions::ExcType;
+use crate::types::Type;
 
+use super::{List, PyTrait, Tuple};
 use crate::heap::{Heap, HeapData, HeapId};
 use crate::intern::Interns;
 use crate::resource::ResourceTracker;
 use crate::run_frame::RunResult;
-use crate::types::{List, PyTrait, Tuple};
 use crate::value::{Attr, Value};
 
 /// Python dict type, wrapping an IndexMap to preserve insertion order.
@@ -311,11 +312,64 @@ impl Dict {
         }
         result
     }
+
+    /// Creates a dict from the `dict()` constructor call.
+    ///
+    /// - `dict()` with no args returns an empty dict
+    /// - `dict(dict)` returns a shallow copy of the dict
+    ///
+    /// Note: Full Python semantics also support dict(iterable) where iterable
+    /// yields (key, value) pairs, and dict(**kwargs) for keyword arguments.
+    pub fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, interns: &Interns) -> RunResult<Value> {
+        let value = args.get_zero_one_arg("dict")?;
+        match value {
+            None => {
+                let heap_id = heap.allocate(HeapData::Dict(Dict::new()))?;
+                Ok(Value::Ref(heap_id))
+            }
+            Some(v) => {
+                let Value::Ref(id) = &v else {
+                    let err = ExcType::type_error_not_iterable(v.py_type(Some(heap)));
+                    v.drop_with_heap(heap);
+                    return Err(err);
+                };
+                let id = *id;
+
+                // Check if it's a dict and get key-value pairs
+                let HeapData::Dict(dict) = heap.get(id) else {
+                    let err = ExcType::type_error_not_iterable(v.py_type(Some(heap)));
+                    v.drop_with_heap(heap);
+                    return Err(err);
+                };
+
+                // Copy all key-value pairs first (without incrementing refcounts)
+                let pairs: Vec<(Value, Value)> = dict
+                    .iter_pairs()
+                    .map(|(k, v)| (k.copy_for_extend(), v.copy_for_extend()))
+                    .collect();
+
+                // Now we can drop the borrow and increment refcounts
+                for (k, v) in &pairs {
+                    if let Value::Ref(key_id) = k {
+                        heap.inc_ref(*key_id);
+                    }
+                    if let Value::Ref(val_id) = v {
+                        heap.inc_ref(*val_id);
+                    }
+                }
+                v.drop_with_heap(heap);
+
+                let new_dict = Dict::from_pairs(pairs, heap, interns)?;
+                let result = heap.allocate(HeapData::Dict(new_dict))?;
+                Ok(Value::Ref(result))
+            }
+        }
+    }
 }
 
 impl PyTrait for Dict {
-    fn py_type(&self, _heap: Option<&Heap<impl ResourceTracker>>) -> &'static str {
-        "dict"
+    fn py_type(&self, _heap: Option<&Heap<impl ResourceTracker>>) -> Type {
+        Type::Dict
     }
 
     fn py_estimate_size(&self) -> usize {
@@ -516,7 +570,7 @@ impl PyTrait for Dict {
                     }
                 }
             }
-            _ => Err(ExcType::attribute_error("dict", attr)),
+            _ => Err(ExcType::attribute_error(Type::Dict, attr)),
         }
     }
 }

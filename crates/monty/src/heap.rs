@@ -10,7 +10,7 @@ use crate::exceptions::ExcType;
 use crate::intern::{FunctionId, Interns};
 use crate::resource::{ResourceError, ResourceTracker};
 use crate::run_frame::RunResult;
-use crate::types::{Bytes, Dict, List, PyTrait, Str, Tuple};
+use crate::types::{Bytes, Dict, List, PyTrait, Str, Tuple, Type};
 use crate::value::{Attr, Value};
 
 /// Unique identifier for values stored inside the heap arena.
@@ -110,15 +110,15 @@ impl HeapData {
 /// This provides efficient dispatch without boxing overhead by matching on
 /// the enum variant and delegating to the inner type's implementation.
 impl PyTrait for HeapData {
-    fn py_type(&self, heap: Option<&Heap<impl ResourceTracker>>) -> &'static str {
+    fn py_type(&self, heap: Option<&Heap<impl ResourceTracker>>) -> Type {
         match self {
             Self::Str(s) => s.py_type(heap),
             Self::Bytes(b) => b.py_type(heap),
             Self::List(l) => l.py_type(heap),
             Self::Tuple(t) => t.py_type(heap),
             Self::Dict(d) => d.py_type(heap),
-            Self::Closure(_, _, _) | Self::FunctionDefaults(_, _) => "function",
-            Self::Cell(_) => "cell",
+            Self::Closure(_, _, _) | Self::FunctionDefaults(_, _) => Type::Function,
+            Self::Cell(_) => Type::Cell,
         }
     }
 

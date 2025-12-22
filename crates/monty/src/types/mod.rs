@@ -9,12 +9,16 @@ pub mod bytes;
 pub mod dict;
 pub mod list;
 pub mod py_trait;
+pub mod range;
 pub mod str;
 pub mod tuple;
+pub mod r#type;
 
 pub use bytes::Bytes;
 pub use dict::Dict;
 pub use list::List;
 pub use py_trait::PyTrait;
+pub use r#type::Type;
+pub use range::Range;
 pub use str::Str;
 pub use tuple::Tuple;

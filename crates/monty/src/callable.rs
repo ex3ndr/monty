@@ -10,7 +10,7 @@ use crate::{
     namespace::{NamespaceId, Namespaces},
     resource::ResourceTracker,
     run_frame::RunResult,
-    types::PyTrait,
+    types::{PyTrait, Type},
     value::Value,
 };
 
@@ -117,10 +117,10 @@ impl Callable {
         }
     }
 
-    pub fn py_type(&self) -> &'static str {
+    pub fn py_type(&self) -> Type {
         match self {
             Self::Builtin(b) => b.py_type(),
-            Self::Name(_) => "function",
+            Self::Name(_) => Type::Function,
         }
     }
 
@@ -132,6 +132,7 @@ impl Callable {
         match self {
             Self::Builtin(Builtins::Function(f)) => (*f).into(),
             Self::Builtin(Builtins::ExcType(e)) => (*e).into(),
+            Self::Builtin(Builtins::Type(t)) => (*t).into(),
             Self::Name(ident) => interns.get_str(ident.name_id),
         }
     }

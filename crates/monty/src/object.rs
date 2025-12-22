@@ -10,6 +10,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
+    builtins::Builtins,
     exceptions::{ExcType, SimpleException},
     heap::{Heap, HeapData, HeapId},
     intern::Interns,
@@ -20,7 +21,7 @@ use crate::{
         list::List,
         str::{string_repr, Str},
         tuple::Tuple,
-        PyTrait,
+        PyTrait, Type,
     },
     value::Value,
 };
@@ -91,6 +92,10 @@ pub enum PyObject {
         /// Optional string argument passed to the exception constructor.
         arg: Option<String>,
     },
+    /// A Python type object (e.g., `int`, `str`, `list`).
+    ///
+    /// Returned by the `type()` builtin and can be compared with other types.
+    Type(Type),
     /// Fallback for values that cannot be represented as other variants.
     ///
     /// Contains the `repr()` string of the original value.
@@ -112,6 +117,7 @@ impl fmt::Display for PyObject {
         match self {
             Self::String(s) => f.write_str(s),
             Self::Cycle(_, placeholder) => f.write_str(placeholder),
+            Self::Type(t) => write!(f, "<class '{t}'>"),
             _ => self.repr_fmt(f),
         }
     }
@@ -182,6 +188,7 @@ impl PyObject {
             }
             Self::Repr(_) => Err(InvalidInputError::new("Repr")),
             Self::Cycle(_, _) => Err(InvalidInputError::new("Cycle")),
+            Self::Type(t) => Ok(Value::Builtin(Builtins::Type(t))),
         }
     }
 
@@ -271,6 +278,7 @@ impl PyObject {
                 visited.remove(id);
                 result
             }
+            Value::Builtin(Builtins::Type(t)) => Self::Type(*t),
             #[cfg(feature = "dec-ref-check")]
             Value::Dereferenced => panic!("Dereferenced found while converting to PyObject"),
             _ => Self::Repr(object.py_repr(heap, interns).into_owned()),
@@ -356,6 +364,7 @@ impl PyObject {
             }
             Self::Repr(s) => write!(f, "Repr({})", string_repr(s)),
             Self::Cycle(_, placeholder) => f.write_str(placeholder),
+            Self::Type(t) => write!(f, "<class '{t}'>"),
         }
     }
 
@@ -384,6 +393,7 @@ impl PyObject {
             Self::Exception { .. } => true,
             Self::Repr(_) => true,
             Self::Cycle(_, _) => true,
+            Self::Type(_) => true,
         }
     }
 
@@ -406,6 +416,7 @@ impl PyObject {
             Self::Exception { .. } => "Exception",
             Self::Repr(_) => "repr",
             Self::Cycle(_, _) => "cycle",
+            Self::Type(_) => "type",
         }
     }
 }
@@ -423,6 +434,10 @@ impl Hash for PyObject {
             Self::Float(f64) => f64.to_bits().hash(state),
             Self::String(string) => string.hash(state),
             Self::Bytes(bytes) => bytes.hash(state),
+            Self::Type(t) => {
+                let type_str: &'static str = t.into();
+                type_str.hash(state);
+            }
             Self::Cycle(_, _) => panic!("cycle values are not hashable"),
             _ => panic!("{} python values are not hashable", self.type_name()),
         }
@@ -455,6 +470,7 @@ impl PartialEq for PyObject {
             ) => a_type == b_type && a_arg == b_arg,
             (Self::Repr(a), Self::Repr(b)) => a == b,
             (Self::Cycle(a, _), Self::Cycle(b, _)) => a == b,
+            (Self::Type(a), Self::Type(b)) => a == b,
             _ => false,
         }
     }
@@ -659,6 +675,12 @@ impl Serialize for PyObject {
             Self::Cycle(_, placeholder) => {
                 let mut map = serializer.serialize_map(Some(1))?;
                 map.serialize_entry("$cycle", placeholder)?;
+                map.end()
+            }
+            Self::Type(t) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                let type_str: &'static str = t.into();
+                map.serialize_entry("$type", type_str)?;
                 map.end()
             }
         }

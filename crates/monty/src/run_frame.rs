@@ -594,12 +594,12 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
         start_index: usize,
     ) -> RunResult<Option<FrameExit>> {
         let iter_value = frame_ext_call!(self.execute_expr(namespaces, heap, iter)?);
-        let Value::Range(range_size) = iter_value else {
+        let Value::Range(range) = iter_value else {
             return internal_err!(InternalRunError::TodoError; "`for` iter must be a range");
         };
 
         let namespace_id = target.namespace_id();
-        for value in (0i64..range_size).skip(start_index) {
+        for value in range.iter().skip(start_index) {
             // For loop target is always local scope
             let namespace = namespaces.get_mut(self.local_idx);
             namespace.set(namespace_id, Value::Int(value));

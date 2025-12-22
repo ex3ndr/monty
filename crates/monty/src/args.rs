@@ -60,6 +60,15 @@ impl ArgValues {
         }
     }
 
+    /// Checks that zero or one argument was passed, returning the optional value.
+    pub fn get_zero_one_arg(self, name: &str) -> RunResult<Option<Value>> {
+        match self {
+            Self::Empty => Ok(None),
+            Self::One(a) => Ok(Some(a)),
+            _ => Err(ExcType::type_error_at_most(name, 1, self.count())),
+        }
+    }
+
     /// Splits arguments into positional and keyword components.
     ///
     /// Returns (positional_args, keyword_args) where keyword_args is a Vec

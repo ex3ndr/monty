@@ -773,10 +773,10 @@ impl<'h, 's, T: ResourceTracker, W: PrintWriter> EvaluateExpr<'h, 's, T, W> {
         };
 
         let HeapData::Dict(dict) = self.heap.get(*heap_id) else {
-            let type_name = var_kwargs_value.py_type(Some(self.heap));
+            let type_ = var_kwargs_value.py_type(Some(self.heap));
             var_kwargs_value.drop_with_heap(self.heap);
             self.drop_values(args);
-            return Err(ExcType::kwargs_type_error(callable_name, type_name).into());
+            return Err(ExcType::kwargs_type_error(callable_name, type_).into());
         };
 
         // Two-phase copy pattern (see extend_args_from_iterable for explanation)

@@ -6,10 +6,14 @@ use std::fmt::Write;
 
 use ahash::AHashSet;
 
-use crate::heap::{Heap, HeapId};
+use super::{PyTrait, Type};
+use crate::args::ArgValues;
+use crate::exceptions::ExcType;
+use crate::heap::{Heap, HeapData, HeapId};
 use crate::intern::Interns;
 use crate::resource::ResourceTracker;
-use crate::types::PyTrait;
+use crate::run_frame::RunResult;
+use crate::value::Value;
 
 /// Python bytes value stored on the heap.
 ///
@@ -33,6 +37,59 @@ impl Bytes {
     /// Returns a mutable reference to the inner byte vector.
     pub fn as_vec_mut(&mut self) -> &mut Vec<u8> {
         &mut self.0
+    }
+
+    /// Creates bytes from the `bytes()` constructor call.
+    ///
+    /// - `bytes()` with no args returns empty bytes
+    /// - `bytes(int)` returns bytes of that length filled with zeros
+    /// - `bytes(string)` encodes the string as UTF-8 (simplified, no encoding param)
+    /// - `bytes(bytes)` returns a copy of the bytes
+    ///
+    /// Note: Full Python semantics for bytes() are more complex (encoding, errors params).
+    pub fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, interns: &Interns) -> RunResult<Value> {
+        let value = args.get_zero_one_arg("bytes")?;
+        match value {
+            None => {
+                let heap_id = heap.allocate(HeapData::Bytes(Bytes::new(Vec::new())))?;
+                Ok(Value::Ref(heap_id))
+            }
+            Some(v) => {
+                let result = match &v {
+                    Value::Int(n) => {
+                        if *n < 0 {
+                            return Err(ExcType::value_error_negative_bytes_count());
+                        }
+                        let bytes = vec![0u8; *n as usize];
+                        heap.allocate(HeapData::Bytes(Bytes::new(bytes)))
+                    }
+                    Value::InternString(string_id) => {
+                        let s = interns.get_str(*string_id);
+                        heap.allocate(HeapData::Bytes(Bytes::new(s.as_bytes().to_vec())))
+                    }
+                    Value::InternBytes(bytes_id) => {
+                        let b = interns.get_bytes(*bytes_id);
+                        heap.allocate(HeapData::Bytes(Bytes::new(b.to_vec())))
+                    }
+                    Value::Ref(id) => match heap.get(*id) {
+                        HeapData::Str(s) => heap.allocate(HeapData::Bytes(Bytes::new(s.as_str().as_bytes().to_vec()))),
+                        HeapData::Bytes(b) => heap.allocate(HeapData::Bytes(Bytes::new(b.as_slice().to_vec()))),
+                        _ => {
+                            let err = ExcType::type_error_bytes_init(v.py_type(Some(heap)));
+                            v.drop_with_heap(heap);
+                            return Err(err);
+                        }
+                    },
+                    _ => {
+                        let err = ExcType::type_error_bytes_init(v.py_type(Some(heap)));
+                        v.drop_with_heap(heap);
+                        return Err(err);
+                    }
+                };
+                v.drop_with_heap(heap);
+                Ok(Value::Ref(result?))
+            }
+        }
     }
 }
 
@@ -63,8 +120,8 @@ impl std::ops::Deref for Bytes {
 }
 
 impl PyTrait for Bytes {
-    fn py_type(&self, _heap: Option<&Heap<impl ResourceTracker>>) -> &'static str {
-        "bytes"
+    fn py_type(&self, _heap: Option<&Heap<impl ResourceTracker>>) -> Type {
+        Type::Bytes
     }
 
     fn py_estimate_size(&self) -> usize {

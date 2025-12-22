@@ -12,7 +12,7 @@ use crate::intern::Interns;
 use crate::io::PrintWriter;
 use crate::resource::ResourceTracker;
 use crate::run_frame::RunResult;
-use crate::types::PyTrait;
+use crate::types::{PyTrait, Type};
 use crate::value::Value;
 
 /// Enumerates every interpreter-native Python builtins
@@ -21,9 +21,12 @@ use crate::value::Value;
 /// All variants serialize to lowercase (e.g., `Print` -> "print").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtins {
+    /// A builtin function like `print`, `len`, `type`, etc.
     Function(BuiltinsFunctions),
     /// An exception type constructor like `ValueError`, `TypeError`, etc.
     ExcType(ExcType),
+    /// A type constructor like `list`, `dict`, `int`, etc.
+    Type(Type),
 }
 
 impl Builtins {
@@ -44,6 +47,7 @@ impl Builtins {
         match self {
             Self::Function(b) => b.call(heap, args, interns, writer),
             Self::ExcType(exc) => exc.call(heap, args, interns),
+            Self::Type(t) => t.call(heap, args, interns),
         }
     }
 
@@ -52,13 +56,16 @@ impl Builtins {
         match self {
             Self::Function(b) => write!(f, "<built-in function {b}>"),
             Self::ExcType(e) => write!(f, "<class '{e}'>"),
+            Self::Type(t) => write!(f, "<class '{t}'>"),
         }
     }
 
-    pub fn py_type(self) -> &'static str {
+    /// Returns the type of this builtin.
+    pub fn py_type(self) -> Type {
         match self {
-            Self::Function(_) => "builtin_function_or_method",
-            Self::ExcType(_) => "type",
+            Self::Function(_) => Type::BuiltinFunction,
+            Self::ExcType(_) => Type::Type,
+            Self::Type(_) => Type::Type,
         }
     }
 }
@@ -67,10 +74,13 @@ impl FromStr for Builtins {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Priority: BuiltinsFunctions > ExcType > Type
         if let Ok(b) = BuiltinsFunctions::from_str(s) {
             Ok(Self::Function(b))
         } else if let Ok(exc) = ExcType::from_str(s) {
             Ok(Self::ExcType(exc))
+        } else if let Ok(t) = Type::from_str(s) {
+            Ok(Self::Type(t))
         } else {
             Err(())
         }
@@ -86,11 +96,11 @@ impl FromStr for Builtins {
 pub enum BuiltinsFunctions {
     Print,
     Len,
-    Str,
     Repr,
     Id,
-    Range,
     Hash,
+    Type,
+    Isinstance,
 }
 
 impl BuiltinsFunctions {
@@ -118,12 +128,6 @@ impl BuiltinsFunctions {
                 value.drop_with_heap(heap);
                 result
             }
-            Self::Str => {
-                let value = args.get_one_arg("str")?;
-                let heap_id = heap.allocate(HeapData::Str(value.py_str(heap, interns).into_owned().into()))?;
-                value.drop_with_heap(heap);
-                Ok(Value::Ref(heap_id))
-            }
             Self::Repr => {
                 let value = args.get_one_arg("repr")?;
                 let heap_id = heap.allocate(HeapData::Str(value.py_repr(heap, interns).into_owned().into()))?;
@@ -146,12 +150,6 @@ impl BuiltinsFunctions {
                 }
                 Ok(Value::Int(id as i64))
             }
-            Self::Range => {
-                let value = args.get_one_arg("range")?;
-                let result = value.as_int();
-                value.drop_with_heap(heap);
-                Ok(Value::Range(result?))
-            }
             Self::Hash => {
                 let value = args.get_one_arg("hash")?;
                 let result = match value.py_hash_u64(heap, interns) {
@@ -161,7 +159,68 @@ impl BuiltinsFunctions {
                 value.drop_with_heap(heap);
                 result
             }
+            Self::Type => {
+                let value = args.get_one_arg("type")?;
+                let type_obj = value.py_type(Some(heap));
+                value.drop_with_heap(heap);
+                Ok(Value::Builtin(Builtins::Type(type_obj)))
+            }
+            Self::Isinstance => {
+                let (obj, classinfo) = args.get_two_args("isinstance")?;
+                let obj_type = obj.py_type(Some(heap));
+
+                let Ok(result) = isinstance_check(obj_type, &classinfo, heap) else {
+                    obj.drop_with_heap(heap);
+                    classinfo.drop_with_heap(heap);
+                    return Err(ExcType::isinstance_arg2_error());
+                };
+
+                obj.drop_with_heap(heap);
+                classinfo.drop_with_heap(heap);
+                Ok(Value::Bool(result))
+            }
         }
+    }
+}
+
+/// Recursively checks if obj_type matches classinfo for isinstance().
+///
+/// Returns `Ok(true)` if the type matches, `Ok(false)` if it doesn't,
+/// or `Err(())` if classinfo is invalid (not a type or tuple of types).
+///
+/// Supports:
+/// - Single types: `isinstance(x, int)`
+/// - Exception types: `isinstance(err, ValueError)`
+/// - Nested tuples: `isinstance(x, (int, (str, bytes)))`
+fn isinstance_check(obj_type: Type, classinfo: &Value, heap: &Heap<impl ResourceTracker>) -> Result<bool, ()> {
+    match classinfo {
+        // Single type: isinstance(x, int)
+        Value::Builtin(Builtins::Type(t)) => Ok(obj_type.is_instance_of(*t)),
+
+        // Exception type: isinstance(err, ValueError) or isinstance(err, Exception)
+        Value::Builtin(Builtins::ExcType(exc)) => {
+            // Exception base class matches any exception type
+            if *exc == ExcType::Exception {
+                Ok(matches!(obj_type, Type::Exception(_)))
+            } else {
+                Ok(matches!(obj_type, Type::Exception(e) if e == *exc))
+            }
+        }
+
+        // Tuple of types (possibly nested): isinstance(x, (int, (str, bytes)))
+        Value::Ref(id) => {
+            if let HeapData::Tuple(tuple) = heap.get(*id) {
+                for v in tuple.as_vec() {
+                    if isinstance_check(obj_type, v, heap)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            } else {
+                Err(()) // Not a tuple - invalid
+            }
+        }
+        _ => Err(()), // Invalid classinfo
     }
 }
 

@@ -19,7 +19,7 @@ use crate::resource::ResourceTracker;
 use crate::run_frame::RunResult;
 use crate::types::bytes::bytes_repr_fmt;
 use crate::types::str::string_repr_fmt;
-use crate::types::{Dict, PyTrait};
+use crate::types::{Dict, PyTrait, Range, Type};
 
 /// Primary value type representing Python objects at runtime.
 ///
@@ -39,7 +39,7 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Range(i64),
+    Range(Range),
     /// An interned string literal. The StringId references the string in the Interns table.
     /// To get the actual string content, use `interns.get(string_id)`.
     InternString(StringId),
@@ -85,23 +85,23 @@ impl From<bool> for Value {
 }
 
 impl PyTrait for Value {
-    fn py_type(&self, heap: Option<&Heap<impl ResourceTracker>>) -> &'static str {
+    fn py_type(&self, heap: Option<&Heap<impl ResourceTracker>>) -> Type {
         match self {
-            Self::Undefined => "undefined",
-            Self::Ellipsis => "ellipsis",
-            Self::None => "NoneType",
-            Self::Bool(_) => "bool",
-            Self::Int(_) => "int",
-            Self::Float(_) => "float",
-            Self::Range(_) => "range",
-            Self::InternString(_) => "str",
-            Self::InternBytes(_) => "bytes",
-            Self::Exc(e) => e.type_str(),
+            Self::Undefined => panic!("Cannot get type of undefined value"),
+            Self::Ellipsis => Type::Ellipsis,
+            Self::None => Type::NoneType,
+            Self::Bool(_) => Type::Bool,
+            Self::Int(_) => Type::Int,
+            Self::Float(_) => Type::Float,
+            Self::Range(_) => Type::Range,
+            Self::InternString(_) => Type::Str,
+            Self::InternBytes(_) => Type::Bytes,
+            Self::Exc(e) => e.py_type(),
             Self::Builtin(c) => c.py_type(),
-            Self::Function(_) | Self::ExtFunction(_) => "function",
+            Self::Function(_) | Self::ExtFunction(_) => Type::Function,
             Self::Ref(id) => match heap {
                 Some(heap) => heap.get(*id).py_type(Some(heap)),
-                None => "object",
+                None => Type::Unknown,
             },
             #[cfg(feature = "dec-ref-check")]
             Self::Dereferenced => panic!("Cannot access Dereferenced object"),
@@ -122,6 +122,7 @@ impl PyTrait for Value {
             // Count Unicode characters, not bytes, to match Python semantics
             Self::InternString(string_id) => Some(interns.get_str(*string_id).chars().count()),
             Self::InternBytes(bytes_id) => Some(interns.get_bytes(*bytes_id).len()),
+            Self::Range(r) => r.py_len(heap, interns),
             Self::Ref(id) => heap.get(*id).py_len(heap, interns),
             _ => None,
         }
@@ -132,7 +133,7 @@ impl PyTrait for Value {
             (Self::Undefined, _) => false,
             (_, Self::Undefined) => false,
             (Self::Int(v1), Self::Int(v2)) => v1 == v2,
-            (Self::Range(v1), Self::Range(v2)) => v1 == v2,
+            (Self::Range(r1), Self::Range(r2)) => r1.py_eq(r2, heap, interns),
             (Self::Bool(v1), Self::Bool(v2)) => v1 == v2,
             (Self::Bool(v1), Self::Int(v2)) => i64::from(*v1) == *v2,
             (Self::Int(v1), Self::Bool(v2)) => *v1 == i64::from(*v2),
@@ -234,9 +235,9 @@ impl PyTrait for Value {
             Self::Bool(b) => *b,
             Self::Int(v) => *v != 0,
             Self::Float(f) => *f != 0.0,
-            Self::Range(v) => *v != 0,
+            Self::Range(r) => r.py_bool(heap, interns),
             Self::Exc(_) => true,
-            Self::Builtin(_) => true,                         // Builtinss are always truthy
+            Self::Builtin(_) => true,                         // Builtins are always truthy
             Self::Function(_) | Self::ExtFunction(_) => true, // same
             Self::InternString(string_id) => !interns.get_str(*string_id).is_empty(),
             Self::InternBytes(bytes_id) => !interns.get_bytes(*bytes_id).is_empty(),
@@ -268,7 +269,7 @@ impl PyTrait for Value {
                     write!(f, "{s}.0")
                 }
             }
-            Self::Range(size) => write!(f, "0:{size}"),
+            Self::Range(r) => r.py_repr_fmt(f, heap, heap_ids, interns),
             Self::Exc(exc) => exc.py_repr_fmt(f),
             Self::Builtin(b) => b.py_repr_fmt(f),
             Self::Function(f_id) => interns.get_function(*f_id).py_repr_fmt(f, interns, 0),
@@ -860,7 +861,7 @@ impl Value {
             // Value-based IDs for immediate types (no heap allocation!)
             Self::Int(v) => int_value_id(*v),
             Self::Float(v) => float_value_id(*v),
-            Self::Range(v) => range_value_id(*v),
+            Self::Range(r) => range_value_id(r),
             Self::Exc(e) => exc_value_id(e),
             Self::Builtin(c) => builtin_value_id(*c),
             Self::Function(f_id) => function_value_id(*f_id),
@@ -909,9 +910,9 @@ impl Value {
                 f.to_bits().hash(&mut hasher);
                 Some(hasher.finish())
             }
-            Self::Range(r) => {
+            Self::Range(range) => {
                 let mut hasher = DefaultHasher::new();
-                r.hash(&mut hasher);
+                range.hash(&mut hasher);
                 Some(hasher.finish())
             }
             Self::Exc(e) => {
@@ -926,6 +927,7 @@ impl Value {
                 match b {
                     Builtins::Function(b) => discriminant(b).hash(&mut hasher),
                     Builtins::ExcType(exc) => discriminant(exc).hash(&mut hasher),
+                    Builtins::Type(t) => discriminant(t).hash(&mut hasher),
                 }
                 Some(hasher.finish())
             }
@@ -1075,7 +1077,7 @@ impl Value {
             Self::Bool(b) => Self::Bool(*b),
             Self::Int(v) => Self::Int(*v),
             Self::Float(v) => Self::Float(*v),
-            Self::Range(v) => Self::Range(*v),
+            Self::Range(r) => Self::Range(*r),
             Self::Exc(e) => Self::Exc(e.clone()),
             Self::Builtin(b) => Self::Builtin(*b),
             Self::Function(f) => Self::Function(*f),
@@ -1298,11 +1300,11 @@ fn float_value_id(value: f64) -> usize {
     FLOAT_ID_TAG | (hasher.finish() as usize & FLOAT_ID_MASK)
 }
 
-/// Computes a deterministic ID for a Range value.
+/// Computes a deterministic ID for a Range value based on its start, stop, and step.
 #[inline]
-fn range_value_id(value: i64) -> usize {
+fn range_value_id(range: &Range) -> usize {
     let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
+    range.hash(&mut hasher);
     RANGE_ID_TAG | (hasher.finish() as usize & RANGE_ID_MASK)
 }
 
@@ -1321,6 +1323,7 @@ fn builtin_value_id(b: Builtins) -> usize {
     match &b {
         Builtins::Function(f) => discriminant(f).hash(&mut hasher),
         Builtins::ExcType(exc) => discriminant(exc).hash(&mut hasher),
+        Builtins::Type(t) => discriminant(t).hash(&mut hasher),
     }
     BUILTIN_ID_TAG | (hasher.finish() as usize & BUILTIN_ID_MASK)
 }

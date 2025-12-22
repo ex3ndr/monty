@@ -16,7 +16,7 @@ use crate::parse::CodeRange;
 use crate::resource::{ResourceError, ResourceTracker};
 use crate::run_frame::RunResult;
 use crate::types::str::string_repr;
-use crate::types::PyTrait;
+use crate::types::{PyTrait, Type};
 use crate::value::{Attr, Value};
 
 /// Python exception types supported by the interpreter.
@@ -26,6 +26,8 @@ use crate::value::{Attr, Value};
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, IntoStaticStr, Serialize, Deserialize)]
 pub enum ExcType {
+    /// Base exception class - matches any exception in isinstance checks.
+    Exception,
     AssertionError,
     ValueError,
     TypeError,
@@ -104,29 +106,29 @@ impl ExcType {
     }
 
     #[must_use]
-    pub fn attribute_error(type_str: &str, attr: &Attr) -> RunError {
-        exc_fmt!(Self::AttributeError; "'{type_str}' object has no attribute '{attr}'").into()
+    pub fn attribute_error(type_: Type, attr: &Attr) -> RunError {
+        exc_fmt!(Self::AttributeError; "'{type_}' object has no attribute '{attr}'").into()
     }
 
     #[must_use]
-    pub fn type_error_not_sub(type_str: &str) -> RunError {
-        exc_fmt!(Self::TypeError; "'{type_str}' object is not subscriptable").into()
+    pub fn type_error_not_sub(type_: Type) -> RunError {
+        exc_fmt!(Self::TypeError; "'{type_}' object is not subscriptable").into()
     }
 
     /// Creates a TypeError for item assignment on types that don't support it.
     ///
     /// Matches CPython's format: `TypeError: '{type}' object does not support item assignment`
     #[must_use]
-    pub fn type_error_not_sub_assignment(type_str: &str) -> RunError {
-        exc_fmt!(Self::TypeError; "'{type_str}' object does not support item assignment").into()
+    pub fn type_error_not_sub_assignment(type_: Type) -> RunError {
+        exc_fmt!(Self::TypeError; "'{type_}' object does not support item assignment").into()
     }
 
     /// Creates a TypeError for unhashable types (e.g., list, dict used as dict keys).
     ///
     /// This matches Python's error message: `TypeError: unhashable type: 'list'`
     #[must_use]
-    pub fn type_error_unhashable(type_str: &str) -> RunError {
-        exc_fmt!(Self::TypeError; "unhashable type: '{type_str}'").into()
+    pub fn type_error_unhashable(type_: Type) -> RunError {
+        exc_fmt!(Self::TypeError; "unhashable type: '{type_}'").into()
     }
 
     /// Creates a KeyError for a missing dict key.
@@ -298,6 +300,78 @@ impl ExcType {
         exc_fmt!(Self::TypeError; "{}", msg).into()
     }
 
+    /// Creates a TypeError for bytes() constructor with invalid type.
+    ///
+    /// Matches CPython's format: `TypeError: cannot convert '{type}' object to bytes`
+    #[must_use]
+    pub fn type_error_bytes_init(type_: Type) -> RunError {
+        exc_fmt!(Self::TypeError; "cannot convert '{}' object to bytes", type_).into()
+    }
+
+    /// Creates a TypeError for calling a non-callable type.
+    ///
+    /// Matches CPython's format: `TypeError: cannot create '{type}' instances`
+    #[must_use]
+    pub fn type_error_not_callable(type_: Type) -> RunError {
+        exc_fmt!(Self::TypeError; "cannot create '{}' instances", type_).into()
+    }
+
+    /// Creates a TypeError for non-iterable type in list/tuple/etc constructors.
+    ///
+    /// Matches CPython's format: `TypeError: '{type}' object is not iterable`
+    #[must_use]
+    pub fn type_error_not_iterable(type_: Type) -> RunError {
+        exc_fmt!(Self::TypeError; "'{}' object is not iterable", type_).into()
+    }
+
+    /// Creates a TypeError for int() constructor with invalid type.
+    ///
+    /// Matches CPython's format: `TypeError: int() argument must be a string, a bytes-like object or a real number, not '{type}'`
+    #[must_use]
+    pub fn type_error_int_conversion(type_: Type) -> RunError {
+        exc_fmt!(Self::TypeError; "int() argument must be a string, a bytes-like object or a real number, not '{}'", type_).into()
+    }
+
+    /// Creates a TypeError for float() constructor with invalid type.
+    ///
+    /// Matches CPython's format: `TypeError: float() argument must be a string or a real number, not '{type}'`
+    #[must_use]
+    pub fn type_error_float_conversion(type_: Type) -> RunError {
+        exc_fmt!(Self::TypeError; "float() argument must be a string or a real number, not '{}'", type_).into()
+    }
+
+    /// Creates a ValueError for negative count in bytes().
+    ///
+    /// Matches CPython's format: `ValueError: negative count`
+    #[must_use]
+    pub fn value_error_negative_bytes_count() -> RunError {
+        exc_static!(Self::ValueError; "negative count").into()
+    }
+
+    /// Creates a TypeError for isinstance() arg 2.
+    ///
+    /// Matches CPython's format: `TypeError: isinstance() arg 2 must be a type, a tuple of types, or a union`
+    #[must_use]
+    pub fn isinstance_arg2_error() -> RunError {
+        exc_static!(Self::TypeError; "isinstance() arg 2 must be a type, a tuple of types, or a union").into()
+    }
+
+    /// Creates a ValueError for range() step argument being zero.
+    ///
+    /// Matches CPython's format: `ValueError: range() arg 3 must not be zero`
+    #[must_use]
+    pub fn value_error_range_step_zero() -> RunError {
+        exc_static!(Self::ValueError; "range() arg 3 must not be zero").into()
+    }
+
+    /// Creates a TypeError for functions that don't accept keyword arguments.
+    ///
+    /// Matches CPython's format: `TypeError: {name}() takes no keyword arguments`
+    #[must_use]
+    pub fn type_error_no_kwargs(name: &str) -> RunError {
+        exc_fmt!(Self::TypeError; "{}() takes no keyword arguments", name).into()
+    }
+
     /// Creates an IndexError for list index out of range.
     ///
     /// Matches CPython's format: `IndexError('list index out of range')`
@@ -318,7 +392,7 @@ impl ExcType {
     ///
     /// Matches CPython's format: `TypeError('{type}' indices must be integers, not '{index_type}')`
     #[must_use]
-    pub fn type_error_indices(type_str: &str, index_type: &str) -> RunError {
+    pub fn type_error_indices(type_str: Type, index_type: Type) -> RunError {
         exc_fmt!(Self::TypeError; "{} indices must be integers, not '{}'", type_str, index_type).into()
     }
 
@@ -438,10 +512,10 @@ impl ExcType {
 
     /// Generates a consistent error for invalid `**kwargs` types.
     #[must_use]
-    pub fn kwargs_type_error(callable_name: Option<&str>, type_name: &str) -> SimpleException {
+    pub fn kwargs_type_error(callable_name: Option<&str>, type_: Type) -> SimpleException {
         let message = match callable_name {
-            Some(name) => format!("{name}() argument after ** must be a mapping, not {type_name}"),
-            None => format!("argument after ** must be a mapping, not {type_name}"),
+            Some(name) => format!("{name}() argument after ** must be a mapping, not {type_}"),
+            None => format!("argument after ** must be a mapping, not {type_}"),
         };
         SimpleException::new(ExcType::TypeError, Some(message))
     }
@@ -490,8 +564,8 @@ impl SimpleException {
         self.arg.as_ref()
     }
 
-    pub(crate) fn type_str(&self) -> &'static str {
-        self.exc_type.into()
+    pub(crate) fn py_type(&self) -> Type {
+        Type::Exception(self.exc_type)
     }
 
     /// Returns the exception formatted as Python would display it to the user.
@@ -555,13 +629,13 @@ impl SimpleException {
         left: &ExprLoc,
         op: &Operator,
         right: &ExprLoc,
-        left_type: &str,
-        right_type: &str,
+        left_type: Type,
+        right_type: Type,
     ) -> RunResult<T> {
         let new_position = left.position.extend(&right.position);
 
         // CPython uses a special message for str/list + operations
-        let message = if *op == Operator::Add && (left_type == "str" || left_type == "list") {
+        let message = if *op == Operator::Add && (left_type == Type::Str || left_type == Type::List) {
             format!("can only concatenate {left_type} (not \"{right_type}\") to {left_type}")
         } else {
             format!("unsupported operand type(s) for {op}: '{left_type}' and '{right_type}'")
@@ -576,8 +650,8 @@ impl SimpleException {
         left: &ExprLoc,
         op: &CmpOperator,
         right: &ExprLoc,
-        left_type: &str,
-        right_type: &str,
+        left_type: Type,
+        right_type: Type,
     ) -> RunResult<T> {
         let new_position = left.position.extend(&right.position);
 
@@ -596,8 +670,8 @@ impl SimpleException {
     /// `unsupported operand type(s) for {op}: '{left}' and '{right}'`
     ///
     /// Returns a `SimpleException` without frame info - caller should add the frame.
-    pub(crate) fn augmented_assign_type_error(op: &Operator, left_type: &str, right_type: &str) -> Self {
-        let message = if *op == Operator::Add && (left_type == "str" || left_type == "list") {
+    pub(crate) fn augmented_assign_type_error(op: &Operator, left_type: Type, right_type: Type) -> Self {
+        let message = if *op == Operator::Add && (left_type == Type::Str || left_type == Type::List) {
             format!("can only concatenate {left_type} (not \"{right_type}\") to {left_type}")
         } else {
             format!("unsupported operand type(s) for {op}: '{left_type}' and '{right_type}'")
