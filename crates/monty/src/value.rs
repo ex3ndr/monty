@@ -18,7 +18,11 @@ use crate::{
     heap::{Heap, HeapData, HeapId},
     intern::{BytesId, ExtFunctionId, FunctionId, Interns, StaticStrings, StringId},
     resource::{LARGE_RESULT_THRESHOLD, ResourceTracker},
-    types::{LongInt, PyTrait, Type, bytes::bytes_repr_fmt, str::string_repr_fmt},
+    types::{
+        LongInt, PyTrait, Type,
+        bytes::{bytes_repr_fmt, get_byte_at_index},
+        str::{allocate_char, get_char_at_index, string_repr_fmt},
+    },
 };
 
 /// Primary value type representing Python objects at runtime.
@@ -1352,6 +1356,30 @@ impl PyTrait for Value {
                 // Need to take entry out to allow mutable heap access
                 let id = *id;
                 heap.with_entry_mut(id, |heap, data| data.py_getitem(key, heap, interns))
+            }
+            Self::InternString(string_id) => {
+                // Handle interned string indexing, accepting Int and Bool
+                let index = match key {
+                    Self::Int(i) => *i,
+                    Self::Bool(b) => i64::from(*b),
+                    _ => return Err(ExcType::type_error_indices(Type::Str, key.py_type(heap))),
+                };
+
+                let s = interns.get_str(*string_id);
+                let c = get_char_at_index(s, index).ok_or_else(ExcType::str_index_error)?;
+                Ok(allocate_char(c, heap)?)
+            }
+            Self::InternBytes(bytes_id) => {
+                // Handle interned bytes indexing - returns integer byte value
+                let index = match key {
+                    Self::Int(i) => *i,
+                    Self::Bool(b) => i64::from(*b),
+                    _ => return Err(ExcType::type_error_indices(Type::Bytes, key.py_type(heap))),
+                };
+
+                let bytes = interns.get_bytes(*bytes_id);
+                let byte = get_byte_at_index(bytes, index).ok_or_else(ExcType::bytes_index_error)?;
+                Ok(Self::Int(i64::from(byte)))
             }
             _ => Err(ExcType::type_error_not_sub(self.py_type(heap))),
         }

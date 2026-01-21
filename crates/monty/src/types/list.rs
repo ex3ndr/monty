@@ -192,9 +192,10 @@ impl PyTrait for List {
     }
 
     fn py_getitem(&self, key: &Value, heap: &mut Heap<impl ResourceTracker>, _interns: &Interns) -> RunResult<Value> {
-        // Extract integer index from key, returning TypeError if not an int
+        // Extract integer index, accepting both Int and Bool (True=1, False=0)
         let index = match key {
             Value::Int(i) => *i,
+            Value::Bool(b) => i64::from(*b),
             _ => return Err(ExcType::type_error_indices(Type::List, key.py_type(heap))),
         };
 
@@ -211,6 +212,49 @@ impl PyTrait for List {
         // Safety: normalized_index is validated to be in [0, len) above
         let idx = usize::try_from(normalized_index).expect("list index validated non-negative");
         Ok(self.items[idx].clone_with_heap(heap))
+    }
+
+    fn py_setitem(
+        &mut self,
+        key: Value,
+        value: Value,
+        heap: &mut Heap<impl ResourceTracker>,
+        _interns: &Interns,
+    ) -> RunResult<()> {
+        // Extract integer index, accepting both Int and Bool (True=1, False=0)
+        let index = match key {
+            Value::Int(i) => i,
+            Value::Bool(b) => i64::from(b),
+            _ => {
+                let key_type = key.py_type(heap);
+                key.drop_with_heap(heap);
+                value.drop_with_heap(heap);
+                return Err(ExcType::type_error_list_assignment_indices(key_type));
+            }
+        };
+
+        // Normalize negative indices (Python-style: -1 = last element)
+        let len = i64::try_from(self.items.len()).expect("list length exceeds i64::MAX");
+        let normalized_index = if index < 0 { index + len } else { index };
+
+        // Bounds check
+        if normalized_index < 0 || normalized_index >= len {
+            value.drop_with_heap(heap);
+            return Err(ExcType::list_assignment_index_error());
+        }
+
+        // Replace value, drop old one
+        let idx = usize::try_from(normalized_index).expect("index validated non-negative");
+        let old_value = std::mem::replace(&mut self.items[idx], value);
+        old_value.drop_with_heap(heap);
+
+        // Update contains_refs if adding a Ref
+        if matches!(self.items[idx], Value::Ref(_)) {
+            self.contains_refs = true;
+            heap.mark_potential_cycle();
+        }
+
+        Ok(())
     }
 
     fn py_eq(&self, other: &Self, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> bool {
