@@ -3,12 +3,24 @@
 //! The REPL session keeps heap/global namespace state between snippets and executes
 //! only the newly fed snippet each time.
 
-use monty::{ExternalResult, MontyObject, MontyRepl, MontyRun, NoLimitTracker, ReplProgress, StdPrint};
+use monty::{ExternalResult, MontyObject, MontyRepl, NoLimitTracker, ReplProgress, StdPrint};
+
+fn init_repl(code: &str, external_functions: Vec<String>) -> (MontyRepl<NoLimitTracker>, MontyObject) {
+    MontyRepl::new(
+        code.to_owned(),
+        "repl.py",
+        vec![],
+        external_functions,
+        vec![],
+        NoLimitTracker,
+        &mut StdPrint,
+    )
+    .unwrap()
+}
 
 #[test]
 fn repl_executes_only_new_code() {
-    let runner = MontyRun::new("counter = 0".to_owned(), "repl.py", vec![], vec![]).unwrap();
-    let (mut repl, init_output) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let (mut repl, init_output) = init_repl("counter = 0", vec![]);
     assert_eq!(init_output, MontyObject::None);
 
     // Execute a snippet that mutates state.
@@ -22,8 +34,7 @@ fn repl_executes_only_new_code() {
 
 #[test]
 fn repl_persists_state_and_definitions() {
-    let runner = MontyRun::new("x = 10".to_owned(), "repl.py", vec![], vec![]).unwrap();
-    let (mut repl, _) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let (mut repl, _) = init_repl("x = 10", vec![]);
 
     repl.feed_no_print("def add(v):\n    return x + v").unwrap();
     repl.feed_no_print("x = 20").unwrap();
@@ -33,8 +44,7 @@ fn repl_persists_state_and_definitions() {
 
 #[test]
 fn repl_function_redefinition_uses_latest_definition() {
-    let runner = MontyRun::new(String::new(), "repl.py", vec![], vec![]).unwrap();
-    let (mut repl, init_output) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let (mut repl, init_output) = init_repl("", vec![]);
     assert_eq!(init_output, MontyObject::None);
 
     repl.feed_no_print("def f():\n    return 1").unwrap();
@@ -46,8 +56,7 @@ fn repl_function_redefinition_uses_latest_definition() {
 
 #[test]
 fn repl_nested_function_redefinition_updates_callers() {
-    let runner = MontyRun::new(String::new(), "repl.py", vec![], vec![]).unwrap();
-    let (mut repl, init_output) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let (mut repl, init_output) = init_repl("", vec![]);
     assert_eq!(init_output, MontyObject::None);
 
     repl.feed_no_print("def g():\n    return 10").unwrap();
@@ -60,8 +69,7 @@ fn repl_nested_function_redefinition_updates_callers() {
 
 #[test]
 fn repl_runtime_error_keeps_partial_state_consistent() {
-    let runner = MontyRun::new(String::new(), "repl.py", vec![], vec![]).unwrap();
-    let (mut repl, init_output) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let (mut repl, init_output) = init_repl("", vec![]);
     assert_eq!(init_output, MontyObject::None);
 
     let result = repl.feed_no_print("def f():\n    return 41\nx = 1\nraise RuntimeError('boom')");
@@ -74,8 +82,7 @@ fn repl_runtime_error_keeps_partial_state_consistent() {
 
 #[test]
 fn repl_heap_mutations_are_not_replayed() {
-    let runner = MontyRun::new("items = []".to_owned(), "repl.py", vec![], vec![]).unwrap();
-    let (mut repl, _) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let (mut repl, _) = init_repl("items = []", vec![]);
 
     repl.feed_no_print("items.append(1)").unwrap();
     assert_eq!(
@@ -92,8 +99,7 @@ fn repl_heap_mutations_are_not_replayed() {
 
 #[test]
 fn repl_dump_load_survives_between_snippets() {
-    let runner = MontyRun::new("total = 1".to_owned(), "repl.py", vec![], vec![]).unwrap();
-    let (mut repl, _) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let (mut repl, _) = init_repl("total = 1", vec![]);
     repl.feed_no_print("total = total + 1").unwrap();
 
     let bytes = repl.dump().unwrap();
@@ -106,8 +112,7 @@ fn repl_dump_load_survives_between_snippets() {
 
 #[test]
 fn repl_dump_load_preserves_heap_aliasing() {
-    let runner = MontyRun::new("a = []\nb = a".to_owned(), "repl.py", vec![], vec![]).unwrap();
-    let (mut repl, _) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let (mut repl, _) = init_repl("a = []\nb = a", vec![]);
 
     repl.feed_no_print("a.append(1)").unwrap();
 
@@ -127,8 +132,7 @@ fn repl_dump_load_preserves_heap_aliasing() {
 
 #[test]
 fn repl_start_external_call_resumes_to_updated_repl() {
-    let runner = MontyRun::new(String::new(), "repl.py", vec![], vec!["ext_fn".to_owned()]).unwrap();
-    let (repl, init_output) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let (repl, init_output) = init_repl("", vec!["ext_fn".to_owned()]);
     assert_eq!(init_output, MontyObject::None);
 
     let progress = repl.start("ext_fn(41) + 1", &mut StdPrint).unwrap();
@@ -146,8 +150,7 @@ fn repl_start_external_call_resumes_to_updated_repl() {
 
 #[test]
 fn repl_progress_dump_load_roundtrip() {
-    let runner = MontyRun::new(String::new(), "repl.py", vec![], vec!["ext_fn".to_owned()]).unwrap();
-    let (repl, _) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let (repl, _) = init_repl("", vec!["ext_fn".to_owned()]);
 
     let progress = repl.start("ext_fn(20) + 22", &mut StdPrint).unwrap();
     let bytes = progress.dump().unwrap();
@@ -165,19 +168,14 @@ fn repl_progress_dump_load_roundtrip() {
 
 #[test]
 fn repl_start_run_pending_resolve_futures_roundtrip() {
-    let runner = MontyRun::new(
+    let (repl, _) = init_repl(
         r"
 async def main():
     value = await foo()
     return value + 1
-"
-        .to_owned(),
-        "repl.py",
-        vec![],
+",
         vec!["foo".to_owned()],
-    )
-    .unwrap();
-    let (repl, _) = runner.into_repl(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    );
 
     let progress = repl.start("await main()", &mut StdPrint).unwrap();
     let (_function_name, _args, _kwargs, call_id, state) =

@@ -1,7 +1,11 @@
-use std::{fs, process::ExitCode, time::Instant};
+use std::{
+    env, fs,
+    io::{self, BufRead, Write},
+    process::ExitCode,
+    time::Instant,
+};
 
-use clap::Parser;
-use monty::{MontyObject, MontyRun, NoLimitTracker, RunProgress, StdPrint};
+use monty::{MontyObject, MontyRepl, MontyRun, NoLimitTracker, RunProgress, StdPrint};
 // disabled due to format failing on https://github.com/pydantic/monty/pull/75 where CI and local wanted imports ordered differently
 // TODO re-enabled soon!
 #[rustfmt::skip]
@@ -18,8 +22,26 @@ struct Cli {
 const EXT_FUNCTIONS: bool = false;
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let file_path = &cli.file;
+    let args: Vec<String> = env::args().collect();
+    let repl_mode = matches!(args.get(1).map(String::as_str), Some("--repl" | "-r"));
+
+    if repl_mode {
+        let file_path = args.get(2).map_or("repl.py", String::as_str);
+        let code = if args.len() > 2 {
+            match read_file(file_path) {
+                Ok(code) => code,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else {
+            String::new()
+        };
+        return run_repl(file_path, code);
+    }
+
+    let file_path = args.get(1).map_or("example.py", String::as_str);
     let code = match read_file(file_path) {
         Ok(code) => code,
         Err(err) => {
@@ -28,6 +50,10 @@ fn main() -> ExitCode {
         }
     };
 
+    run_script(file_path, code)
+}
+
+fn run_script(file_path: &str, code: String) -> ExitCode {
     let start = Instant::now();
     if let Some(failure) = type_check(&SourceFile::new(&code, file_path), None).unwrap() {
         eprintln!("type checking failed:\n{failure}");
@@ -51,7 +77,7 @@ fn main() -> ExitCode {
 
     if EXT_FUNCTIONS {
         let start = Instant::now();
-        let mut progress = match runner.start(inputs, NoLimitTracker, &mut StdPrint) {
+        let progress = match runner.start(inputs, NoLimitTracker, &mut StdPrint) {
             Ok(p) => p,
             Err(err) => {
                 let elapsed = start.elapsed();
@@ -60,61 +86,16 @@ fn main() -> ExitCode {
             }
         };
 
-        // Handle external function calls in a loop
-        loop {
-            match progress {
-                RunProgress::Complete(value) => {
-                    let elapsed = start.elapsed();
-                    eprintln!("success after: {elapsed:?}\n{value}");
-                    return ExitCode::SUCCESS;
-                }
-                RunProgress::FunctionCall {
-                    function_name,
-                    args,
-                    state,
-                    ..
-                } => {
-                    let return_value = if function_name == "add_ints" {
-                        // Extract two integer arguments and add them
-                        if args.len() != 2 {
-                            eprintln!("add_ints requires exactly 2 arguments, got {}", args.len());
-                            return ExitCode::FAILURE;
-                        }
-                        if let (MontyObject::Int(a), MontyObject::Int(b)) = (&args[0], &args[1]) {
-                            let ret = MontyObject::Int(a + b);
-                            eprintln!("Function call: {function_name}({args:?}) -> {ret:?}");
-                            ret
-                        } else {
-                            eprintln!("add_ints requires integer arguments, got {args:?}");
-                            return ExitCode::FAILURE;
-                        }
-                    } else {
-                        let elapsed = start.elapsed();
-                        eprintln!("{elapsed:?}, unknown external function: {function_name}({args:?})");
-                        return ExitCode::FAILURE;
-                    };
-
-                    // Resume execution with the return value
-                    match state.run(return_value, &mut StdPrint) {
-                        Ok(p) => progress = p,
-                        Err(err) => {
-                            let elapsed = start.elapsed();
-                            eprintln!("error after: {elapsed:?}\n{err}");
-                            return ExitCode::FAILURE;
-                        }
-                    }
-                }
-                RunProgress::ResolveFutures(state) => {
-                    let elapsed = start.elapsed();
-                    let pending = state.pending_call_ids();
-                    eprintln!("{elapsed:?}, async futures not supported in CLI: {pending:?}");
-                    return ExitCode::FAILURE;
-                }
-                RunProgress::OsCall { function, args, .. } => {
-                    let elapsed = start.elapsed();
-                    eprintln!("{elapsed:?}, OS calls not supported in CLI: {function:?}({args:?})");
-                    return ExitCode::FAILURE;
-                }
+        match run_until_complete(progress) {
+            Ok(value) => {
+                let elapsed = start.elapsed();
+                eprintln!("success after: {elapsed:?}\n{value}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                let elapsed = start.elapsed();
+                eprintln!("error after: {elapsed:?}\n{err}");
+                ExitCode::FAILURE
             }
         }
     } else {
@@ -130,6 +111,116 @@ fn main() -> ExitCode {
         let elapsed = start.elapsed();
         eprintln!("success after: {elapsed:?}\n{value}");
         ExitCode::SUCCESS
+    }
+}
+
+fn run_repl(file_path: &str, code: String) -> ExitCode {
+    let input_names = vec![];
+    let inputs = vec![];
+    let ext_functions = vec!["add_ints".to_owned()];
+
+    let (mut repl, init_output) = match MontyRepl::new(
+        code,
+        file_path,
+        input_names,
+        ext_functions,
+        inputs,
+        NoLimitTracker,
+        &mut StdPrint,
+    ) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("error initializing repl:\n{err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if init_output != MontyObject::None {
+        println!("{init_output}");
+    }
+
+    eprintln!("Monty REPL mode. Enter Python snippets line-by-line. Use :quit to exit.");
+    let stdin = io::stdin();
+    let mut stdin = stdin.lock();
+
+    loop {
+        print!(">>> ");
+        if io::stdout().flush().is_err() {
+            eprintln!("error: failed to flush stdout");
+            return ExitCode::FAILURE;
+        }
+
+        let mut line = String::new();
+        let read = match stdin.read_line(&mut line) {
+            Ok(n) => n,
+            Err(err) => {
+                eprintln!("error reading input: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        if read == 0 {
+            return ExitCode::SUCCESS;
+        }
+
+        let snippet = line.trim_end();
+        if snippet.is_empty() {
+            continue;
+        }
+        if snippet == ":quit" {
+            return ExitCode::SUCCESS;
+        }
+
+        match repl.feed_no_print(snippet) {
+            Ok(output) => {
+                if output != MontyObject::None {
+                    println!("{output}");
+                }
+            }
+            Err(err) => eprintln!("error:\n{err}"),
+        }
+    }
+}
+
+fn run_until_complete(mut progress: RunProgress<NoLimitTracker>) -> Result<MontyObject, String> {
+    loop {
+        match progress {
+            RunProgress::Complete(value) => return Ok(value),
+            RunProgress::FunctionCall {
+                function_name,
+                args,
+                state,
+                ..
+            } => {
+                let return_value = resolve_external_call(&function_name, &args)?;
+                progress = state.run(return_value, &mut StdPrint).map_err(|err| format!("{err}"))?;
+            }
+            RunProgress::ResolveFutures(state) => {
+                return Err(format!(
+                    "async futures not supported in CLI: {:?}",
+                    state.pending_call_ids()
+                ));
+            }
+            RunProgress::OsCall { function, args, .. } => {
+                return Err(format!("OS calls not supported in CLI: {function:?}({args:?})"));
+            }
+        }
+    }
+}
+
+fn resolve_external_call(function_name: &str, args: &[MontyObject]) -> Result<MontyObject, String> {
+    if function_name != "add_ints" {
+        return Err(format!("unknown external function: {function_name}({args:?})"));
+    }
+
+    if args.len() != 2 {
+        return Err(format!("add_ints requires exactly 2 arguments, got {}", args.len()));
+    }
+
+    if let (MontyObject::Int(a), MontyObject::Int(b)) = (&args[0], &args[1]) {
+        Ok(MontyObject::Int(a + b))
+    } else {
+        Err(format!("add_ints requires integer arguments, got {args:?}"))
     }
 }
 
