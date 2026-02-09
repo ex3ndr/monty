@@ -19,6 +19,7 @@ mod object;
 mod os;
 mod parse;
 mod prepare;
+mod repl;
 mod resource;
 mod run;
 mod signature;
@@ -33,11 +34,9 @@ pub use crate::{
     io::{CollectStringPrint, NoPrint, PrintWriter, StdPrint},
     object::{DictPairs, InvalidInputError, MontyObject},
     os::{OsFunction, dir_stat, file_stat, stat_result, symlink_stat},
+    repl::{MontyRepl, ReplFutureSnapshot, ReplProgress, ReplSnapshot},
     resource::{
         DEFAULT_MAX_RECURSION_DEPTH, LimitedTracker, NoLimitTracker, ResourceError, ResourceLimits, ResourceTracker,
     },
-    run::{
-        ExternalResult, FutureSnapshot, MontyFuture, MontyRepl, MontyRun, ReplFutureSnapshot, ReplProgress,
-        ReplSnapshot, RunProgress, Snapshot,
-    },
+    run::{ExternalResult, FutureSnapshot, MontyFuture, MontyRun, RunProgress, Snapshot},
 };

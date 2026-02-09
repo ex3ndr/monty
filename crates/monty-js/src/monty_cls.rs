@@ -46,8 +46,8 @@
 use std::borrow::Cow;
 
 use monty::{
-    CollectStringPrint, ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject, MontyRun, NoLimitTracker,
-    ResourceTracker, RunProgress, Snapshot,
+    CollectStringPrint, ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject,
+    MontyRepl as CoreMontyRepl, MontyRun, NoLimitTracker, ResourceTracker, RunProgress, Snapshot,
 };
 use monty_type_checking::{type_check, SourceFile};
 use napi::bindgen_prelude::*;
@@ -325,6 +325,55 @@ impl Monty {
         }
     }
 
+    /// Initializes a stateful no-replay REPL session from this runner.
+    ///
+    /// The runner code is executed once to initialize globals; subsequent calls to
+    /// `MontyRepl.feed()` execute only new snippets.
+    #[napi]
+    pub fn into_repl<'env>(
+        &self,
+        env: &'env Env,
+        options: Option<StartOptions<'env>>,
+    ) -> Result<Either<MontyRepl, JsMontyException>> {
+        let input_values = self.extract_input_values(options.and_then(|opts| opts.inputs), *env)?;
+        let mut print_output = CollectStringPrint::default();
+
+        if let Some(limits) = options.and_then(|opts| opts.limits) {
+            let tracker = LimitedTracker::new(limits.into());
+            match CoreMontyRepl::new(
+                self.runner.code().to_owned(),
+                &self.script_name,
+                self.input_names.clone(),
+                self.external_function_names.clone(),
+                input_values,
+                tracker,
+                &mut print_output,
+            ) {
+                Ok((repl, _output)) => Ok(Either::A(MontyRepl {
+                    repl: EitherRepl::Limited(repl),
+                    script_name: self.script_name.clone(),
+                })),
+                Err(exc) => Ok(Either::B(JsMontyException::new(exc))),
+            }
+        } else {
+            match CoreMontyRepl::new(
+                self.runner.code().to_owned(),
+                &self.script_name,
+                self.input_names.clone(),
+                self.external_function_names.clone(),
+                input_values,
+                NoLimitTracker,
+                &mut print_output,
+            ) {
+                Ok((repl, _output)) => Ok(Either::A(MontyRepl {
+                    repl: EitherRepl::NoLimit(repl),
+                    script_name: self.script_name.clone(),
+                })),
+                Err(exc) => Ok(Either::B(JsMontyException::new(exc))),
+            }
+        }
+    }
+
     /// Serializes the Monty instance to a binary format.
     ///
     /// The serialized data can be stored and later restored with `Monty.load()`.
@@ -447,6 +496,89 @@ fn run_type_check_result(code: &str, script_name: &str, prefix_code: Option<&str
         type_check(&source_file, None).map_err(|e| Error::from_reason(format!("Type checking failed: {e}")))?;
 
     Ok(result.map(MontyTypingError::from_failure))
+}
+
+// =============================================================================
+// MontyRepl - Incremental no-replay REPL session
+// =============================================================================
+
+/// REPL state holder for napi interoperability.
+///
+/// `napi` classes cannot be generic, so this enum stores REPL sessions for both
+/// resource tracker variants.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum EitherRepl {
+    NoLimit(CoreMontyRepl<NoLimitTracker>),
+    Limited(CoreMontyRepl<LimitedTracker>),
+}
+
+/// Stateful no-replay REPL session.
+///
+/// Each call to `feed()` compiles and executes only the provided snippet against
+/// existing session state.
+#[napi]
+pub struct MontyRepl {
+    repl: EitherRepl,
+    script_name: String,
+}
+
+#[napi]
+impl MontyRepl {
+    /// Returns the script name for this REPL session.
+    #[napi(getter)]
+    #[must_use]
+    pub fn script_name(&self) -> String {
+        self.script_name.clone()
+    }
+
+    /// Executes one incremental snippet against persistent REPL state.
+    #[napi]
+    pub fn feed<'env>(
+        &mut self,
+        env: &'env Env,
+        code: String,
+    ) -> Result<Either<JsMontyObject<'env>, JsMontyException>> {
+        let mut print_output = CollectStringPrint::default();
+        let output = match &mut self.repl {
+            EitherRepl::NoLimit(repl) => repl.feed(&code, &mut print_output),
+            EitherRepl::Limited(repl) => repl.feed(&code, &mut print_output),
+        };
+
+        match output {
+            Ok(value) => Ok(Either::A(monty_to_js(&value, env)?)),
+            Err(exc) => Ok(Either::B(JsMontyException::new(exc))),
+        }
+    }
+
+    /// Serializes this REPL session to bytes.
+    #[napi]
+    pub fn dump(&self) -> Result<Buffer> {
+        let serialized = SerializedRepl {
+            repl: &self.repl,
+            script_name: &self.script_name,
+        };
+        let bytes =
+            postcard::to_allocvec(&serialized).map_err(|e| Error::from_reason(format!("Serialization failed: {e}")))?;
+        Ok(Buffer::from(bytes))
+    }
+
+    /// Restores a REPL session from bytes produced by `dump()`.
+    #[napi(factory)]
+    pub fn load(data: Buffer) -> Result<Self> {
+        let serialized: SerializedReplOwned =
+            postcard::from_bytes(&data).map_err(|e| Error::from_reason(format!("Deserialization failed: {e}")))?;
+        Ok(Self {
+            repl: serialized.repl,
+            script_name: serialized.script_name,
+        })
+    }
+
+    /// Returns a string representation of the REPL session.
+    #[napi]
+    #[must_use]
+    pub fn repr(&self) -> String {
+        format!("MontyRepl(scriptName='{}')", self.script_name)
+    }
 }
 
 // =============================================================================
@@ -766,6 +898,20 @@ struct SerializedMonty {
     script_name: String,
     input_names: Vec<String>,
     external_function_names: Vec<String>,
+}
+
+/// Serialization wrapper for `MontyRepl` using borrowed references.
+#[derive(serde::Serialize)]
+struct SerializedRepl<'a> {
+    repl: &'a EitherRepl,
+    script_name: &'a str,
+}
+
+/// Owned version of `SerializedRepl` for deserialization.
+#[derive(serde::Deserialize)]
+struct SerializedReplOwned {
+    repl: EitherRepl,
+    script_name: String,
 }
 
 /// Serialization wrapper for `MontySnapshot` using borrowed references.

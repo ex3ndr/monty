@@ -16,6 +16,7 @@ import type {
 
 import {
   Monty as NativeMonty,
+  MontyRepl as NativeMontyRepl,
   MontySnapshot as NativeMontySnapshot,
   MontyComplete as NativeMontyComplete,
   MontyException as NativeMontyException,
@@ -345,6 +346,75 @@ export class Monty {
   }
 
   /** Returns a string representation of the Monty instance. */
+  repr(): string {
+    return this._native.repr()
+  }
+}
+
+/**
+ * Incremental no-replay REPL session.
+ */
+export class MontyRepl {
+  private _native: NativeMontyRepl
+
+  /**
+   * Creates a REPL session directly from source code.
+   *
+   * This is a convenience wrapper over `new Monty(...)` + `MontyRepl.fromMonty(...)`.
+   */
+  static create(code: string, options?: MontyOptions, startOptions?: StartOptions): MontyRepl {
+    return MontyRepl.fromMonty(new Monty(code, options), startOptions)
+  }
+
+  /**
+   * Creates a REPL session from a non-REPL `Monty` runner.
+   *
+   * This keeps REPL creation on the REPL class to avoid extending the non-REPL API.
+   */
+  static fromMonty(runner: Monty, options?: StartOptions): MontyRepl {
+    const nativeRunner = (runner as unknown as { _native: NativeMonty })._native
+    const result = nativeRunner.intoRepl(options)
+    if (result instanceof NativeMontyException) {
+      throw new MontyRuntimeError(result)
+    }
+    return new MontyRepl(result)
+  }
+
+  constructor(nativeRepl: NativeMontyRepl) {
+    this._native = nativeRepl
+  }
+
+  /** Returns the script name for this REPL session. */
+  get scriptName(): string {
+    return this._native.scriptName
+  }
+
+  /**
+   * Executes one incremental snippet.
+   *
+   * @param code - Snippet code to execute
+   * @returns Snippet output
+   * @throws {MontyRuntimeError} If execution raises an exception
+   */
+  feed(code: string): JsMontyObject {
+    const result = this._native.feed(code)
+    if (result instanceof NativeMontyException) {
+      throw new MontyRuntimeError(result)
+    }
+    return result
+  }
+
+  /** Serializes the REPL session to bytes. */
+  dump(): Buffer {
+    return this._native.dump()
+  }
+
+  /** Restores a REPL session from bytes. */
+  static load(data: Buffer): MontyRepl {
+    return new MontyRepl(NativeMontyRepl.load(data))
+  }
+
+  /** Returns a string representation of the REPL session. */
   repr(): string {
     return this._native.repr()
   }
