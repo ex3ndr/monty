@@ -36,5 +36,8 @@ pub use crate::{
     resource::{
         DEFAULT_MAX_RECURSION_DEPTH, LimitedTracker, NoLimitTracker, ResourceError, ResourceLimits, ResourceTracker,
     },
-    run::{ExternalResult, FutureSnapshot, MontyFuture, MontyRun, RunProgress, Snapshot},
+    run::{
+        ExternalResult, FutureSnapshot, MontyFuture, MontyRepl, MontyRun, ReplFutureSnapshot, ReplProgress,
+        ReplSnapshot, RunProgress, Snapshot,
+    },
 };
