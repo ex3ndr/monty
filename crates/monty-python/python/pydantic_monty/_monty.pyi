@@ -216,20 +216,6 @@ class MontyRepl:
         Returns `(repl, output)` where `output` is the initial execution result.
         """
 
-    @staticmethod
-    def from_monty(
-        runner: Monty,
-        *,
-        inputs: dict[str, Any] | None = None,
-        limits: ResourceLimits | None = None,
-        print_callback: Callable[[Literal['stdout'], str], None] | None = None,
-    ) -> tuple['MontyRepl', Any]:
-        """
-        Create a REPL session from a non-REPL `Monty` runner.
-
-        Returns `(repl, output)` where `output` is the initial execution result.
-        """
-
     @property
     def script_name(self) -> str:
         """The name of the script being executed."""
