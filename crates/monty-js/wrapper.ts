@@ -360,23 +360,17 @@ export class MontyRepl {
 
   /**
    * Creates a REPL session directly from source code.
-   *
-   * This is a convenience wrapper over `new Monty(...)` + `MontyRepl.fromMonty(...)`.
    */
   static create(code: string, options?: MontyOptions, startOptions?: StartOptions): MontyRepl {
-    return MontyRepl.fromMonty(new Monty(code, options), startOptions)
-  }
-
-  /**
-   * Creates a REPL session from a non-REPL `Monty` runner.
-   *
-   * This keeps REPL creation on the REPL class to avoid extending the non-REPL API.
-   */
-  static fromMonty(runner: Monty, options?: StartOptions): MontyRepl {
-    const nativeRunner = (runner as unknown as { _native: NativeMonty })._native
-    const result = nativeRunner.intoRepl(options)
+    const result = NativeMontyRepl.create(code, options, startOptions)
     if (result instanceof NativeMontyException) {
+      if (result.exception.typeName === 'SyntaxError') {
+        throw new MontySyntaxError(result)
+      }
       throw new MontyRuntimeError(result)
+    }
+    if (result instanceof NativeMontyTypingError) {
+      throw new MontyTypingError(result)
     }
     return new MontyRepl(result)
   }

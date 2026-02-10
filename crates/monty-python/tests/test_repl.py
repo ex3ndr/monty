@@ -22,9 +22,12 @@ def test_repl_dump_load_roundtrip():
     assert loaded.feed('x + 1') == snapshot(42)
 
 
-def test_repl_from_monty_feed_stateful():
-    runner = pydantic_monty.Monty('counter = 0')
-    repl, output = pydantic_monty.MontyRepl.from_monty(runner)
+def test_repl_create_with_start_inputs_feed_stateful():
+    repl, output = pydantic_monty.MontyRepl.create(
+        'counter = start',
+        inputs=['start'],
+        start_inputs={'start': 0},
+    )
 
     assert output == snapshot(None)
     assert repl.feed('counter = counter + 1') == snapshot(None)

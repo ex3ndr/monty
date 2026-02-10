@@ -701,47 +701,6 @@ impl PyMontyRepl {
         Ok((repl, output))
     }
 
-    /// Creates a REPL session from a non-REPL `Monty` runner.
-    ///
-    /// This keeps REPL creation on the `MontyRepl` type so the `Monty` API
-    /// remains focused on non-REPL execution paths.
-    ///
-    /// # Returns
-    /// `(repl, output)` where `output` is the runner's initial execution result.
-    #[staticmethod]
-    #[pyo3(signature = (runner, *, inputs=None, limits=None, print_callback=None))]
-    fn from_monty(
-        py: Python<'_>,
-        runner: &PyMonty,
-        inputs: Option<&Bound<'_, PyDict>>,
-        limits: Option<&Bound<'_, PyDict>>,
-        print_callback: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<(Self, Py<PyAny>)> {
-        let input_values = runner.extract_input_values(inputs)?;
-        let print_callback = print_callback.map(|c| c.clone().unbind());
-        let print_callback_for_create = print_callback.as_ref();
-        let script_name = runner.script_name.clone();
-        let (repl, output) = Self::create_repl(
-            py,
-            runner.runner.code().to_owned(),
-            script_name.clone(),
-            runner.input_names.clone(),
-            runner.external_function_names.clone(),
-            input_values,
-            limits,
-            print_callback_for_create,
-        )?;
-
-        let output = monty_to_py(py, &output, runner.dataclass_registry.bind(py))?;
-        let repl = Self {
-            repl,
-            print_callback,
-            dc_registry: runner.dataclass_registry.clone_ref(py),
-            script_name,
-        };
-        Ok((repl, output))
-    }
-
     /// Feeds and executes a single incremental REPL snippet.
     ///
     /// The snippet is compiled against existing session state and executed once
@@ -833,7 +792,7 @@ impl PyMontyRepl {
 impl PyMontyRepl {
     /// Creates a core REPL and returns both the stored REPL state enum and initial output.
     ///
-    /// This helper centralizes REPL bootstrapping for both `create()` and `from_monty()`.
+    /// This helper centralizes REPL bootstrapping for `create()`.
     #[expect(clippy::too_many_arguments)]
     fn create_repl(
         py: Python<'_>,

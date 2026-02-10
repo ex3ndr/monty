@@ -134,23 +134,17 @@ impl Monty {
         code: String,
         options: Option<MontyOptions>,
     ) -> Result<Either3<Self, JsMontyException, MontyTypingError>> {
-        let options = options.unwrap_or(MontyOptions {
-            script_name: None,
-            inputs: None,
-            external_functions: None,
-            type_check: None,
-            type_check_prefix_code: None,
-        });
-
-        let script_name = options.script_name.unwrap_or_else(|| "main.py".to_string());
-        let input_names = options.inputs.unwrap_or_default();
-        let external_function_names = options.external_functions.unwrap_or_default();
-        let do_type_check = options.type_check.unwrap_or(false);
+        let ResolvedMontyOptions {
+            script_name,
+            input_names,
+            external_function_names,
+            do_type_check,
+            type_check_prefix_code,
+        } = resolve_monty_options(options);
 
         // Perform type checking if requested
         if do_type_check {
-            if let Some(error) = run_type_check_result(&code, &script_name, options.type_check_prefix_code.as_deref())?
-            {
+            if let Some(error) = run_type_check_result(&code, &script_name, type_check_prefix_code.as_deref())? {
                 return Ok(Either3::C(error));
             }
         }
@@ -376,55 +370,6 @@ impl Monty {
         }
     }
 
-    /// Initializes a stateful no-replay REPL session from this runner.
-    ///
-    /// The runner code is executed once to initialize globals; subsequent calls to
-    /// `MontyRepl.feed()` execute only new snippets.
-    #[napi]
-    pub fn into_repl<'env>(
-        &self,
-        env: &'env Env,
-        options: Option<StartOptions<'env>>,
-    ) -> Result<Either<MontyRepl, JsMontyException>> {
-        let input_values = self.extract_input_values(options.and_then(|opts| opts.inputs), *env)?;
-        let mut print_output = CollectStringPrint::default();
-
-        if let Some(limits) = options.and_then(|opts| opts.limits) {
-            let tracker = LimitedTracker::new(limits.into());
-            match CoreMontyRepl::new(
-                self.runner.code().to_owned(),
-                &self.script_name,
-                self.input_names.clone(),
-                self.external_function_names.clone(),
-                input_values,
-                tracker,
-                &mut print_output,
-            ) {
-                Ok((repl, _output)) => Ok(Either::A(MontyRepl {
-                    repl: EitherRepl::Limited(repl),
-                    script_name: self.script_name.clone(),
-                })),
-                Err(exc) => Ok(Either::B(JsMontyException::new(exc))),
-            }
-        } else {
-            match CoreMontyRepl::new(
-                self.runner.code().to_owned(),
-                &self.script_name,
-                self.input_names.clone(),
-                self.external_function_names.clone(),
-                input_values,
-                NoLimitTracker,
-                &mut print_output,
-            ) {
-                Ok((repl, _output)) => Ok(Either::A(MontyRepl {
-                    repl: EitherRepl::NoLimit(repl),
-                    script_name: self.script_name.clone(),
-                })),
-                Err(exc) => Ok(Either::B(JsMontyException::new(exc))),
-            }
-        }
-    }
-
     /// Serializes the Monty instance to a binary format.
     ///
     /// The serialized data can be stored and later restored with `Monty.load()`.
@@ -502,33 +447,7 @@ impl Monty {
 
     /// Extracts input values from the JS Object in the order they were declared.
     fn extract_input_values(&self, inputs: Option<Object<'_>>, env: Env) -> Result<Vec<MontyObject>> {
-        if self.input_names.is_empty() {
-            if inputs.is_some() {
-                return Err(Error::from_reason(
-                    "No input variables declared but inputs object was provided",
-                ));
-            }
-            return Ok(vec![]);
-        }
-
-        let Some(inputs) = inputs else {
-            return Err(Error::from_reason(format!(
-                "Missing required inputs: {:?}",
-                self.input_names
-            )));
-        };
-
-        // Extract values in declaration order
-        self.input_names
-            .iter()
-            .map(|name| {
-                if !inputs.has_named_property(name)? {
-                    return Err(Error::from_reason(format!("Missing required input: '{name}'")));
-                }
-                let value: Unknown = inputs.get_named_property(name)?;
-                js_to_monty(value, env)
-            })
-            .collect()
+        extract_input_values_in_order(&self.input_names, inputs, env)
     }
 }
 
@@ -575,6 +494,76 @@ pub struct MontyRepl {
 
 #[napi]
 impl MontyRepl {
+    /// Creates a REPL session directly from source code.
+    ///
+    /// This mirrors `Monty.create(...)` for parsing/type-checking options, then
+    /// initializes a stateful REPL that executes the initial module once.
+    ///
+    /// @param code - Python code to execute for REPL initialization
+    /// @param options - Parser/type-checking configuration
+    /// @param startOptions - Initial inputs and optional resource limits
+    /// @returns MontyRepl on success, or error object on failure
+    #[napi]
+    pub fn create<'env>(
+        env: &'env Env,
+        code: String,
+        options: Option<MontyOptions>,
+        start_options: Option<StartOptions<'env>>,
+    ) -> Result<Either3<Self, JsMontyException, MontyTypingError>> {
+        let ResolvedMontyOptions {
+            script_name,
+            input_names,
+            external_function_names,
+            do_type_check,
+            type_check_prefix_code,
+        } = resolve_monty_options(options);
+
+        if do_type_check {
+            if let Some(error) = run_type_check_result(&code, &script_name, type_check_prefix_code.as_deref())? {
+                return Ok(Either3::C(error));
+            }
+        }
+
+        let input_values =
+            extract_input_values_in_order(&input_names, start_options.and_then(|opts| opts.inputs), *env)?;
+        let mut print_output = CollectStringPrint::default();
+
+        if let Some(limits) = start_options.and_then(|opts| opts.limits) {
+            let tracker = LimitedTracker::new(limits.into());
+            match CoreMontyRepl::new(
+                code,
+                &script_name,
+                input_names,
+                external_function_names,
+                input_values,
+                tracker,
+                &mut print_output,
+            ) {
+                Ok((repl, _output)) => Ok(Either3::A(Self {
+                    repl: EitherRepl::Limited(repl),
+                    script_name,
+                })),
+                Err(exc) => Ok(Either3::B(JsMontyException::new(exc))),
+            }
+        } else {
+            match CoreMontyRepl::new(
+                code,
+                &script_name,
+                input_names,
+                external_function_names,
+                input_values,
+                NoLimitTracker,
+                &mut print_output,
+            ) {
+                Ok((repl, _output)) => Ok(Either3::A(Self {
+                    repl: EitherRepl::NoLimit(repl),
+                    script_name,
+                })),
+                Err(exc) => Ok(Either3::B(JsMontyException::new(exc))),
+            }
+        }
+    }
+
     /// Returns the script name for this REPL session.
     #[napi(getter)]
     #[must_use]
@@ -630,6 +619,71 @@ impl MontyRepl {
     pub fn repr(&self) -> String {
         format!("MontyRepl(scriptName='{}')", self.script_name)
     }
+}
+
+/// Fully resolved creation options shared by `Monty` and `MontyRepl`.
+///
+/// This keeps parsing/type-checking defaults consistent across non-REPL and
+/// REPL entry points.
+struct ResolvedMontyOptions {
+    script_name: String,
+    input_names: Vec<String>,
+    external_function_names: Vec<String>,
+    do_type_check: bool,
+    type_check_prefix_code: Option<String>,
+}
+
+/// Normalizes optional JS-facing creation options into concrete defaults.
+fn resolve_monty_options(options: Option<MontyOptions>) -> ResolvedMontyOptions {
+    let options = options.unwrap_or(MontyOptions {
+        script_name: None,
+        inputs: None,
+        external_functions: None,
+        type_check: None,
+        type_check_prefix_code: None,
+    });
+
+    ResolvedMontyOptions {
+        script_name: options.script_name.unwrap_or_else(|| "main.py".to_string()),
+        input_names: options.inputs.unwrap_or_default(),
+        external_function_names: options.external_functions.unwrap_or_default(),
+        do_type_check: options.type_check.unwrap_or(false),
+        type_check_prefix_code: options.type_check_prefix_code,
+    }
+}
+
+/// Extracts input values in declaration order from a JS object.
+///
+/// This helper is shared by regular `Monty` execution and direct REPL creation
+/// so both paths perform identical input validation.
+fn extract_input_values_in_order(
+    input_names: &[String],
+    inputs: Option<Object<'_>>,
+    env: Env,
+) -> Result<Vec<MontyObject>> {
+    if input_names.is_empty() {
+        if inputs.is_some() {
+            return Err(Error::from_reason(
+                "No input variables declared but inputs object was provided",
+            ));
+        }
+        return Ok(vec![]);
+    }
+
+    let Some(inputs) = inputs else {
+        return Err(Error::from_reason(format!("Missing required inputs: {input_names:?}")));
+    };
+
+    input_names
+        .iter()
+        .map(|name| {
+            if !inputs.has_named_property(name)? {
+                return Err(Error::from_reason(format!("Missing required input: '{name}'")));
+            }
+            let value: Unknown = inputs.get_named_property(name)?;
+            js_to_monty(value, env)
+        })
+        .collect()
 }
 
 // =============================================================================

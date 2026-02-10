@@ -12,6 +12,14 @@ test('create and feed preserve state without replay', (t) => {
   t.is(repl.feed('counter'), 2)
 })
 
+test('create accepts start inputs', (t) => {
+  const repl = MontyRepl.create('counter = start', { inputs: ['start'] }, { inputs: { start: 3 } })
+
+  t.is(repl.feed('counter'), 3)
+  t.is(repl.feed('counter = counter + 2'), null)
+  t.is(repl.feed('counter'), 5)
+})
+
 test('repl dump/load roundtrip', (t) => {
   const repl = MontyRepl.create('x = 40')
   t.is(repl.feed('x = x + 1'), null)
