@@ -53,6 +53,15 @@ fn main() -> ExitCode {
     run_script(file_path, code)
 }
 
+/// Executes a Python file in one-shot CLI mode.
+///
+/// This path keeps the existing CLI behavior: run type-checking for visibility,
+/// compile the file as a full module, and execute it either through direct
+/// execution or through the suspendable progress loop when external functions
+/// are enabled.
+///
+/// Returns `ExitCode::SUCCESS` for successful execution and
+/// `ExitCode::FAILURE` for parse/type/runtime failures.
 fn run_script(file_path: &str, code: String) -> ExitCode {
     let start = Instant::now();
     if let Some(failure) = type_check(&SourceFile::new(&code, file_path), None).unwrap() {
@@ -114,6 +123,14 @@ fn run_script(file_path: &str, code: String) -> ExitCode {
     }
 }
 
+/// Starts an interactive line-by-line REPL session.
+///
+/// Initializes `MontyRepl` once and then incrementally feeds each entered line
+/// as a snippet without replaying previous snippets, which matches the intended
+/// stateful REPL execution model.
+///
+/// Returns `ExitCode::SUCCESS` on EOF or `:quit`, and `ExitCode::FAILURE` on
+/// initialization or I/O errors.
 fn run_repl(file_path: &str, code: String) -> ExitCode {
     let input_names = vec![];
     let inputs = vec![];
@@ -182,6 +199,14 @@ fn run_repl(file_path: &str, code: String) -> ExitCode {
     }
 }
 
+/// Drives suspendable execution until completion.
+///
+/// This repeatedly resumes `RunProgress` values by resolving supported
+/// external calls and returns the final value when execution reaches
+/// `RunProgress::Complete`.
+///
+/// Returns an error string for unsupported suspend points (OS calls or async
+/// futures) or invalid external-function dispatch.
 fn run_until_complete(mut progress: RunProgress<NoLimitTracker>) -> Result<MontyObject, String> {
     loop {
         match progress {
@@ -208,6 +233,13 @@ fn run_until_complete(mut progress: RunProgress<NoLimitTracker>) -> Result<Monty
     }
 }
 
+/// Resolves supported CLI external function calls.
+///
+/// The CLI currently supports only `add_ints(int, int)`, which makes it
+/// possible to exercise the suspend/resume path in a deterministic way.
+///
+/// Returns a runtime-like error string for unknown function names, wrong arity,
+/// or incorrect argument types.
 fn resolve_external_call(function_name: &str, args: &[MontyObject]) -> Result<MontyObject, String> {
     if function_name != "add_ints" {
         return Err(format!("unknown external function: {function_name}({args:?})"));

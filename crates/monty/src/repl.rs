@@ -10,7 +10,7 @@ use crate::{
     ExcType, MontyException,
     asyncio::CallId,
     bytecode::{Code, Compiler, FrameExit, VM, VMSnapshot},
-    exception_private::RunResult,
+    exception_private::{RunError, RunResult},
     heap::Heap,
     intern::{ExtFunctionId, InternerBuilder, Interns},
     io::{PrintWriter, StdPrint},
@@ -608,8 +608,6 @@ impl<T: ResourceTracker> ReplFutureSnapshot<T> {
         results: Vec<(u32, ExternalResult)>,
         print: &mut impl PrintWriter,
     ) -> Result<ReplProgress<T>, MontyException> {
-        use crate::exception_private::RunError;
-
         let Self {
             mut repl,
             executor,
