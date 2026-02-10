@@ -143,7 +143,7 @@ pub(crate) fn parse_with_interner(
     filename: &str,
     interner: InternerBuilder,
 ) -> Result<ParseResult, ParseError> {
-    let mut parser = Parser::new_with_interner(code, filename, interner);
+    let mut parser = Parser::new(code, filename, interner);
     let parsed = parse_module(code).map_err(|e| ParseError::syntax(e.to_string(), parser.convert_range(e.range())))?;
     let module = parsed.into_syntax();
     let nodes = parser.parse_statements(module.body)?;
@@ -171,7 +171,7 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new_with_interner(code: &'a str, filename: &'a str, mut interner: InternerBuilder) -> Self {
+    fn new(code: &'a str, filename: &'a str, mut interner: InternerBuilder) -> Self {
         // Position of each line in the source code, to convert indexes to line number and column number
         let mut line_ends = vec![];
         for (i, c) in code.chars().enumerate() {
