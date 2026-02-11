@@ -26,19 +26,11 @@ fn main() -> ExitCode {
     let repl_mode = matches!(args.get(1).map(String::as_str), Some("--repl" | "-r"));
 
     if repl_mode {
-        let file_path = args.get(2).map_or("repl.py", String::as_str);
-        let code = if args.len() > 2 {
-            match read_file(file_path) {
-                Ok(code) => code,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    return ExitCode::FAILURE;
-                }
-            }
-        } else {
-            String::new()
-        };
-        return run_repl(file_path, code);
+        if let Some(arg) = args.get(2) {
+            eprintln!("error: unknown argument: {arg}");
+            return ExitCode::FAILURE;
+        }
+        return run_repl("repl.py", String::new());
     }
 
     let file_path = args.get(1).map_or("example.py", String::as_str);
@@ -129,7 +121,7 @@ fn run_script(file_path: &str, code: String) -> ExitCode {
 /// as a snippet without replaying previous snippets, which matches the intended
 /// stateful REPL execution model.
 ///
-/// Returns `ExitCode::SUCCESS` on EOF or `:quit`, and `ExitCode::FAILURE` on
+/// Returns `ExitCode::SUCCESS` on EOF or `:exit`, and `ExitCode::FAILURE` on
 /// initialization or I/O errors.
 fn run_repl(file_path: &str, code: String) -> ExitCode {
     let input_names = vec![];
@@ -156,7 +148,7 @@ fn run_repl(file_path: &str, code: String) -> ExitCode {
         println!("{init_output}");
     }
 
-    eprintln!("Monty REPL mode. Enter Python snippets line-by-line. Use :quit to exit.");
+    eprintln!("Monty REPL mode. Enter Python snippets line-by-line. Use :exit to exit.");
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
 
@@ -184,7 +176,7 @@ fn run_repl(file_path: &str, code: String) -> ExitCode {
         if snippet.is_empty() {
             continue;
         }
-        if snippet == ":quit" {
+        if snippet == ":exit" {
             return ExitCode::SUCCESS;
         }
 
