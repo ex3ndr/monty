@@ -3,7 +3,10 @@
 //! The REPL session keeps heap/global namespace state between snippets and executes
 //! only the newly fed snippet each time.
 
-use monty::{ExternalResult, MontyObject, MontyRepl, NoLimitTracker, ReplProgress, StdPrint};
+use monty::{
+    ExternalResult, MontyObject, MontyRepl, NoLimitTracker, ReplContinuationMode, ReplProgress, StdPrint,
+    detect_repl_continuation_mode,
+};
 
 fn init_repl(code: &str, external_functions: Vec<String>) -> (MontyRepl<NoLimitTracker>, MontyObject) {
     MontyRepl::new(
@@ -95,6 +98,36 @@ fn repl_heap_mutations_are_not_replayed() {
         repl.feed_no_print("items").unwrap(),
         MontyObject::List(vec![MontyObject::Int(1), MontyObject::Int(2)])
     );
+}
+
+#[test]
+fn repl_detects_continuation_mode_for_common_cases() {
+    assert_eq!(
+        detect_repl_continuation_mode("value = 1\n"),
+        ReplContinuationMode::Complete
+    );
+    assert_eq!(
+        detect_repl_continuation_mode("if True:\n"),
+        ReplContinuationMode::IncompleteBlock
+    );
+    assert_eq!(
+        detect_repl_continuation_mode("[1,\n"),
+        ReplContinuationMode::IncompleteImplicit
+    );
+}
+
+#[test]
+fn repl_tracebacks_use_incrementing_python_input_filenames() {
+    let (mut repl, init_output) = init_repl("", vec![]);
+    assert_eq!(init_output, MontyObject::None);
+
+    let first = repl.feed_no_print("missing_name").unwrap_err();
+    let second = repl.feed_no_print("missing_name").unwrap_err();
+
+    assert_eq!(first.traceback().len(), 1);
+    assert_eq!(second.traceback().len(), 1);
+    assert_eq!(first.traceback()[0].filename, "<python-input-0>");
+    assert_eq!(second.traceback()[0].filename, "<python-input-1>");
 }
 
 #[test]

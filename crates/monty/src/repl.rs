@@ -5,6 +5,8 @@
 //! replaying previously executed snippets.
 
 use ahash::AHashMap;
+use ruff_python_ast::token::TokenKind;
+use ruff_python_parser::{InterpolatedStringErrorType, LexicalErrorType, ParseErrorType, parse_module};
 
 use crate::{
     ExcType, MontyException,
@@ -183,6 +185,57 @@ fn frame_exit_to_object(
     }
 }
 
+/// Parse-derived continuation state for interactive REPL input collection.
+///
+/// `monty-cli` uses this to decide whether to execute the buffered snippet
+/// immediately, keep collecting continuation lines, or require a terminating
+/// blank line for block statements (`if:`, `def:`, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplContinuationMode {
+    /// The current snippet is syntactically complete and can run now.
+    Complete,
+    /// The snippet is incomplete and needs more continuation lines.
+    IncompleteImplicit,
+    /// The snippet opened an indented block and should wait for a trailing blank
+    /// line before execution, matching CPython interactive behavior.
+    IncompleteBlock,
+}
+
+/// Detects whether REPL source is complete or needs more input.
+///
+/// This mirrors CPython's broad interactive behavior:
+/// - Incomplete bracketed / parenthesized / triple-quoted constructs continue.
+/// - Clause headers (`if:`, `def:`, etc.) require an indented body and then a
+///   terminating blank line before execution.
+/// - All other parse outcomes are treated as complete (either valid code or a
+///   syntax error that should be shown immediately).
+#[must_use]
+pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
+    let Err(error) = parse_module(source) else {
+        return ReplContinuationMode::Complete;
+    };
+
+    match error.error {
+        ParseErrorType::OtherError(msg) => {
+            if msg.starts_with("Expected an indented block after ") {
+                ReplContinuationMode::IncompleteBlock
+            } else {
+                ReplContinuationMode::Complete
+            }
+        }
+        ParseErrorType::Lexical(LexicalErrorType::Eof)
+        | ParseErrorType::ExpectedToken {
+            found: TokenKind::EndOfFile,
+            ..
+        }
+        | ParseErrorType::FStringError(InterpolatedStringErrorType::UnterminatedTripleQuotedString)
+        | ParseErrorType::TStringError(InterpolatedStringErrorType::UnterminatedTripleQuotedString) => {
+            ReplContinuationMode::IncompleteImplicit
+        }
+        _ => ReplContinuationMode::Complete,
+    }
+}
+
 /// Stateful REPL session that executes snippets incrementally without replay.
 ///
 /// `MontyRepl` preserves heap and global namespace state between snippets.
@@ -191,8 +244,14 @@ fn frame_exit_to_object(
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(bound(serialize = "T: serde::Serialize", deserialize = "T: serde::de::DeserializeOwned"))]
 pub struct MontyRepl<T: ResourceTracker> {
-    /// Script name used for parse and runtime error messages.
+    /// Script name used only for initial module parse and runtime error messages.
+    ///
+    /// Incremental `feed()` snippets intentionally use internal script names
+    /// like `<python-input-0>` to match CPython's interactive traceback style.
     script_name: String,
+    /// Counter for generated `<python-input-N>` snippet filenames.
+    #[serde(default)]
+    next_input_id: u64,
     /// External function names declared for this session.
     external_function_names: Vec<String>,
     /// Stable mapping of global variable names to namespace slot IDs.
@@ -241,6 +300,7 @@ impl<T: ResourceTracker> MontyRepl<T> {
 
         let repl = Self {
             script_name: script_name.to_owned(),
+            next_input_id: 0,
             external_function_names,
             global_name_map: executor.name_map,
             interns: executor.interns,
@@ -272,9 +332,10 @@ impl<T: ResourceTracker> MontyRepl<T> {
             });
         }
 
+        let input_script_name = this.next_input_script_name();
         let executor = ReplExecutor::new_repl_snippet(
             code.to_owned(),
-            &this.script_name,
+            &input_script_name,
             this.external_function_names.clone(),
             this.global_name_map.clone(),
             &this.interns,
@@ -312,9 +373,10 @@ impl<T: ResourceTracker> MontyRepl<T> {
             return Ok(MontyObject::None);
         }
 
+        let input_script_name = self.next_input_script_name();
         let executor = ReplExecutor::new_repl_snippet(
             code.to_owned(),
-            &self.script_name,
+            &input_script_name,
             self.external_function_names.clone(),
             self.global_name_map.clone(),
             &self.interns,
@@ -359,6 +421,17 @@ impl<T: ResourceTracker> MontyRepl<T> {
         if global.len() < namespace_size {
             global.resize_with(namespace_size, || Value::Undefined);
         }
+    }
+
+    /// Returns the generated filename for the next interactive snippet.
+    ///
+    /// CPython labels interactive snippets as `<python-input-N>` and increments
+    /// N for each feed attempt. Matching this improves traceback ergonomics and
+    /// makes REPL errors easier to correlate with user input history.
+    fn next_input_script_name(&mut self) -> String {
+        let input_id = self.next_input_id;
+        self.next_input_id += 1;
+        format!("<python-input-{input_id}>")
     }
 }
 

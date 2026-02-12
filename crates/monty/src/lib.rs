@@ -34,7 +34,9 @@ pub use crate::{
     io::{CollectStringPrint, NoPrint, PrintWriter, StdPrint},
     object::{DictPairs, InvalidInputError, MontyObject},
     os::{OsFunction, dir_stat, file_stat, stat_result, symlink_stat},
-    repl::{MontyRepl, ReplFutureSnapshot, ReplProgress, ReplSnapshot},
+    repl::{
+        MontyRepl, ReplContinuationMode, ReplFutureSnapshot, ReplProgress, ReplSnapshot, detect_repl_continuation_mode,
+    },
     resource::{
         DEFAULT_MAX_RECURSION_DEPTH, LimitedTracker, NoLimitTracker, ResourceError, ResourceLimits, ResourceTracker,
     },
