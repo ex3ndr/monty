@@ -5,7 +5,10 @@ use std::{
     time::Instant,
 };
 
-use monty::{MontyObject, MontyRepl, MontyRun, NoLimitTracker, RunProgress, StdPrint};
+use monty::{
+    MontyObject, MontyRepl, MontyRun, NoLimitTracker, ReplContinuationMode, RunProgress, StdPrint,
+    detect_repl_continuation_mode,
+};
 // disabled due to format failing on https://github.com/pydantic/monty/pull/75 where CI and local wanted imports ordered differently
 // TODO re-enabled soon!
 #[rustfmt::skip]
@@ -23,17 +26,34 @@ const EXT_FUNCTIONS: bool = false;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    let repl_mode = matches!(args.get(1).map(String::as_str), Some("--repl" | "-r"));
-
-    if repl_mode {
-        if let Some(arg) = args.get(2) {
-            eprintln!("error: unknown argument: {arg}");
+    let (interactive_mode, file_path) = match parse_cli_args(&args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
+    };
+
+    if let Some(file_path) = file_path {
+        let code = match read_file(file_path) {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!("error: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return if interactive_mode {
+            run_repl(file_path, code)
+        } else {
+            run_script(file_path, code)
+        };
+    }
+
+    if interactive_mode {
         return run_repl("repl.py", String::new());
     }
 
-    let file_path = args.get(1).map_or("example.py", String::as_str);
+    let file_path = "example.py";
     let code = match read_file(file_path) {
         Ok(code) => code,
         Err(err) => {
@@ -43,6 +63,39 @@ fn main() -> ExitCode {
     };
 
     run_script(file_path, code)
+}
+
+/// Parses CLI arguments for script execution and interactive mode.
+///
+/// Supported forms:
+/// - `monty` (runs `example.py`)
+/// - `monty script.py`
+/// - `monty -i`
+/// - `monty -i script.py`
+///
+/// Returns `(interactive_mode, optional_file_path)`.
+fn parse_cli_args(args: &[String]) -> Result<(bool, Option<&str>), String> {
+    let mut interactive_mode = false;
+    let mut file_path = None;
+
+    for arg in args.iter().skip(1) {
+        if arg == "-i" {
+            interactive_mode = true;
+            continue;
+        }
+
+        if arg.starts_with('-') {
+            return Err(format!("unknown option: {arg}"));
+        }
+
+        if file_path.is_none() {
+            file_path = Some(arg.as_str());
+        } else {
+            return Err(format!("unknown argument: {arg}"));
+        }
+    }
+
+    Ok((interactive_mode, file_path))
 }
 
 /// Executes a Python file in one-shot CLI mode.
@@ -117,11 +170,13 @@ fn run_script(file_path: &str, code: String) -> ExitCode {
 
 /// Starts an interactive line-by-line REPL session.
 ///
-/// Initializes `MontyRepl` once and then incrementally feeds each entered line
-/// as a snippet without replaying previous snippets, which matches the intended
-/// stateful REPL execution model.
+/// Initializes `MontyRepl` once and incrementally feeds entered snippets without
+/// replaying previous snippets, which matches the intended stateful REPL model.
+/// Multiline input follows CPython-style prompts:
+/// - `>>> ` for a new statement
+/// - `... ` for continuation
 ///
-/// Returns `ExitCode::SUCCESS` on EOF or `:exit`, and `ExitCode::FAILURE` on
+/// Returns `ExitCode::SUCCESS` on EOF or `exit`, and `ExitCode::FAILURE` on
 /// initialization or I/O errors.
 fn run_repl(file_path: &str, code: String) -> ExitCode {
     let input_names = vec![];
@@ -148,12 +203,19 @@ fn run_repl(file_path: &str, code: String) -> ExitCode {
         println!("{init_output}");
     }
 
-    eprintln!("Monty REPL mode. Enter Python snippets line-by-line. Use :exit to exit.");
+    eprintln!("Monty REPL mode. Enter Python snippets. Use exit to exit.");
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
+    let mut pending_snippet = String::new();
+    let mut continuation_mode = ReplContinuationMode::Complete;
 
     loop {
-        print!(">>> ");
+        let prompt = if continuation_mode == ReplContinuationMode::Complete {
+            ">>> "
+        } else {
+            "... "
+        };
+        print!("{prompt}");
         if io::stdout().flush().is_err() {
             eprintln!("error: failed to flush stdout");
             return ExitCode::FAILURE;
@@ -173,21 +235,52 @@ fn run_repl(file_path: &str, code: String) -> ExitCode {
         }
 
         let snippet = line.trim_end();
-        if snippet.is_empty() {
+        if continuation_mode == ReplContinuationMode::Complete && snippet.is_empty() {
             continue;
         }
-        if snippet == ":exit" {
+        if continuation_mode == ReplContinuationMode::Complete && snippet == "exit" {
             return ExitCode::SUCCESS;
         }
 
-        match repl.feed_no_print(snippet) {
-            Ok(output) => {
-                if output != MontyObject::None {
-                    println!("{output}");
+        pending_snippet.push_str(snippet);
+        pending_snippet.push('\n');
+
+        if continuation_mode == ReplContinuationMode::IncompleteBlock && snippet.is_empty() {
+            execute_repl_snippet(&mut repl, &pending_snippet);
+            pending_snippet.clear();
+            continuation_mode = ReplContinuationMode::Complete;
+            continue;
+        }
+
+        let detected_mode = detect_repl_continuation_mode(&pending_snippet);
+        match detected_mode {
+            ReplContinuationMode::Complete => {
+                if continuation_mode == ReplContinuationMode::IncompleteBlock {
+                    continue;
+                }
+                execute_repl_snippet(&mut repl, &pending_snippet);
+                pending_snippet.clear();
+                continuation_mode = ReplContinuationMode::Complete;
+            }
+            ReplContinuationMode::IncompleteBlock => continuation_mode = ReplContinuationMode::IncompleteBlock,
+            ReplContinuationMode::IncompleteImplicit => {
+                if continuation_mode != ReplContinuationMode::IncompleteBlock {
+                    continuation_mode = ReplContinuationMode::IncompleteImplicit;
                 }
             }
-            Err(err) => eprintln!("error:\n{err}"),
         }
+    }
+}
+
+/// Executes one collected REPL snippet and prints value/errors for interactive use.
+fn execute_repl_snippet(repl: &mut MontyRepl<NoLimitTracker>, snippet: &str) {
+    match repl.feed_no_print(snippet) {
+        Ok(output) => {
+            if output != MontyObject::None {
+                println!("{output}");
+            }
+        }
+        Err(err) => eprintln!("error:\n{err}"),
     }
 }
 
