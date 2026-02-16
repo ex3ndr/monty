@@ -1,10 +1,11 @@
 use std::{
-    env, fs,
+    fs,
     io::{self, BufRead, Write},
     process::ExitCode,
     time::Instant,
 };
 
+use clap::Parser;
 use monty::{
     MontyObject, MontyRepl, MontyRun, NoLimitTracker, ReplContinuationMode, RunProgress, StdPrint,
     detect_repl_continuation_mode,
@@ -15,26 +16,28 @@ use monty::{
 use monty_type_checking::{SourceFile, type_check};
 
 /// Monty — a sandboxed Python interpreter written in Rust.
+///
+/// - `monty` runs `example.py`
+/// - `monty <file>` runs the file in script mode
+/// - `monty -i` starts an empty interactive REPL
+/// - `monty -i <file>` seeds the REPL with file contents
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
+    /// Start interactive REPL mode.
+    #[arg(short = 'i', long = "interactive")]
+    interactive: bool,
+
     /// Python file to execute.
-    file: String,
+    file: Option<String>,
 }
 
 const EXT_FUNCTIONS: bool = false;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().collect();
-    let (interactive_mode, file_path) = match parse_cli_args(&args) {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            eprintln!("error: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let cli = Cli::parse();
 
-    if let Some(file_path) = file_path {
+    if let Some(file_path) = cli.file.as_deref() {
         let code = match read_file(file_path) {
             Ok(code) => code,
             Err(err) => {
@@ -42,14 +45,14 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        return if interactive_mode {
+        return if cli.interactive {
             run_repl(file_path, code)
         } else {
             run_script(file_path, code)
         };
     }
 
-    if interactive_mode {
+    if cli.interactive {
         return run_repl("repl.py", String::new());
     }
 
@@ -63,39 +66,6 @@ fn main() -> ExitCode {
     };
 
     run_script(file_path, code)
-}
-
-/// Parses CLI arguments for script execution and interactive mode.
-///
-/// Supported forms:
-/// - `monty` (runs `example.py`)
-/// - `monty script.py`
-/// - `monty -i`
-/// - `monty -i script.py`
-///
-/// Returns `(interactive_mode, optional_file_path)`.
-fn parse_cli_args(args: &[String]) -> Result<(bool, Option<&str>), String> {
-    let mut interactive_mode = false;
-    let mut file_path = None;
-
-    for arg in args.iter().skip(1) {
-        if arg == "-i" {
-            interactive_mode = true;
-            continue;
-        }
-
-        if arg.starts_with('-') {
-            return Err(format!("unknown option: {arg}"));
-        }
-
-        if file_path.is_none() {
-            file_path = Some(arg.as_str());
-        } else {
-            return Err(format!("unknown argument: {arg}"));
-        }
-    }
-
-    Ok((interactive_mode, file_path))
 }
 
 /// Executes a Python file in one-shot CLI mode.
