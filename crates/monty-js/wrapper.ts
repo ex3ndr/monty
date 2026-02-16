@@ -20,7 +20,6 @@ import {
   MontySnapshot as NativeMontySnapshot,
   MontyComplete as NativeMontyComplete,
   MontyException as NativeMontyException,
-  MontySnapshot as NativeMontySnapshot,
   MontyTypingError as NativeMontyTypingError,
 } from './index.js'
 
