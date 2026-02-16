@@ -47,7 +47,8 @@ use std::borrow::Cow;
 
 use monty::{
     CollectStringPrint, ExcType, ExternalResult, LimitedTracker, MontyException, MontyObject,
-    MontyRepl as CoreMontyRepl, MontyRun, NoLimitTracker, ResourceTracker, RunProgress, Snapshot,
+    MontyRepl as CoreMontyRepl, MontyRun, NoLimitTracker, PrintWriter, ResourceTracker, RunProgress, Snapshot,
+    StdPrint,
 };
 use monty_type_checking::{type_check, SourceFile};
 use napi::bindgen_prelude::*;
@@ -524,11 +525,15 @@ impl MontyRepl {
             }
         }
 
-        let input_values =
-            extract_input_values_in_order(&input_names, start_options.and_then(|opts| opts.inputs), *env)?;
+        let (start_inputs, start_limits) = match start_options {
+            Some(opts) => (opts.inputs, opts.limits),
+            None => (None, None),
+        };
+
+        let input_values = extract_input_values_in_order(&input_names, start_inputs, *env)?;
         let mut print_output = CollectStringPrint::default();
 
-        if let Some(limits) = start_options.and_then(|opts| opts.limits) {
+        if let Some(limits) = start_limits {
             let tracker = LimitedTracker::new(limits.into());
             match CoreMontyRepl::new(
                 code,
