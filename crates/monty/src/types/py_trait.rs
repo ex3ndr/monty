@@ -206,10 +206,6 @@ pub trait PyTrait {
         Ok(None)
     }
 
-    fn py_mod_eq(&self, _other: &Self, _right_value: i64) -> Option<bool> {
-        None
-    }
-
     /// Python in-place addition (`__iadd__`).
     ///
     /// # Returns
@@ -227,51 +223,6 @@ pub trait PyTrait {
     ) -> Result<bool, ResourceError> {
         other.drop_with_heap(reader.heap);
         Ok(false)
-    }
-
-    /// Python multiplication (`__mul__`).
-    ///
-    /// Returns `Ok(None)` if the operation is not supported for these types.
-    /// For numeric types: Int * Int, Float * Float, Int * Float, etc.
-    /// For sequences: str * int, list * int for repetition.
-    fn py_mult(
-        &self,
-        _other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> RunResult<Option<Value>> {
-        Ok(None)
-    }
-
-    /// Python true division (`__truediv__`).
-    ///
-    /// Always returns float for numeric types. Returns `Ok(None)` if not supported.
-    /// Returns `Err(ZeroDivisionError)` for division by zero.
-    fn py_div(
-        &self,
-        _other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> RunResult<Option<Value>> {
-        Ok(None)
-    }
-
-    /// Python floor division (`__floordiv__`).
-    ///
-    /// Returns int for int//int, float for float operations.
-    /// Returns `Ok(None)` if not supported.
-    /// Returns `Err(ZeroDivisionError)` for division by zero.
-    fn py_floordiv(&self, _other: &Self, _heap: &mut Heap<impl ResourceTracker>) -> RunResult<Option<Value>> {
-        Ok(None)
-    }
-
-    /// Python power (`__pow__`).
-    ///
-    /// Int ** positive_int returns int, int ** negative_int returns float.
-    /// Returns `Ok(None)` if not supported.
-    /// Returns `Err(ZeroDivisionError)` for 0 ** negative.
-    fn py_pow(&self, _other: &Self, _heap: &mut Heap<impl ResourceTracker>) -> RunResult<Option<Value>> {
-        Ok(None)
     }
 
     /// Calls an attribute method on this value (e.g., `list.append()`).

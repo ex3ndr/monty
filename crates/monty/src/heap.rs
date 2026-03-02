@@ -537,18 +537,6 @@ impl HeapData {
         }
     }
 
-    pub fn py_mod_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
-        match (self, other) {
-            (Self::Str(a), Self::Str(b)) => a.py_mod_eq(b, right_value),
-            (Self::Bytes(a), Self::Bytes(b)) => a.py_mod_eq(b, right_value),
-            (Self::List(a), Self::List(b)) => a.py_mod_eq(b, right_value),
-            (Self::Tuple(a), Self::Tuple(b)) => a.py_mod_eq(b, right_value),
-            (Self::Dict(a), Self::Dict(b)) => a.py_mod_eq(b, right_value),
-            // Cells don't support arithmetic operations
-            _ => None,
-        }
-    }
-
     pub fn py_call_attr(
         &mut self,
         heap: &mut Heap<impl ResourceTracker>,
@@ -590,24 +578,6 @@ impl HeapData {
             _ => self
                 .py_call_attr(vm.heap, attr, args, vm.interns)
                 .map(AttrCallResult::Value),
-        }
-    }
-
-    pub fn py_getattr(
-        &self,
-        attr: &EitherStr,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> RunResult<Option<AttrCallResult>> {
-        match self {
-            Self::Dataclass(dc) => dc.py_getattr(attr, heap, interns),
-            Self::Module(m) => Ok(m.py_getattr(attr, heap, interns)),
-            Self::NamedTuple(nt) => nt.py_getattr(attr, heap, interns),
-            Self::Slice(s) => s.py_getattr(attr, heap, interns),
-            Self::Exception(exc) => exc.py_getattr(attr, heap, interns),
-            Self::Path(p) => p.py_getattr(attr, heap, interns),
-            // All other types don't support attribute access via py_getattr
-            _ => Ok(None),
         }
     }
 }
@@ -765,6 +735,7 @@ impl<H: ContainsHeap> ContainsHeap for HeapReader<'_, H> {
     }
 }
 
+#[expect(dead_code, reason = "Some variants are not used in the `.read()` pattern yet")]
 pub enum HeapReadOutput<'a> {
     Str(HeapRead<'a, Str>),
     Bytes(HeapRead<'a, Bytes>),

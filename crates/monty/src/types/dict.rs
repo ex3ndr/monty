@@ -1,20 +1,18 @@
 use std::{
-    cell::{RefCell, RefMut},
     collections::hash_map::DefaultHasher,
     fmt::Write,
     hash::{Hash, Hasher},
-    rc::Rc,
 };
 
 use ahash::AHashSet;
 use hashbrown::{HashTable, hash_table::Entry};
-use smallvec::smallvec;
+use smallvec::{SmallVec, smallvec};
 
 use super::{List, MontyIter, PyTrait, allocate_tuple};
 use crate::{
     args::{ArgValues, KwargsValues},
     defer_drop, defer_drop_mut,
-    exception_private::{ExcType, RunResult, SimpleException},
+    exception_private::{ExcType, RunResult},
     heap::{DropWithHeap, Heap, HeapData, HeapGuard, HeapId, HeapRead, HeapReader},
     intern::{Interns, StaticStrings},
     resource::{ResourceError, ResourceTracker},
@@ -60,11 +58,8 @@ use crate::{
 /// improving GC performance for dicts of primitives.
 #[derive(Debug, Default)]
 pub(crate) struct Dict {
-    /// indices mapping from the entry hash to its index.
-    ///
-    /// Protected in `RefCell` to avoid the possibility of dictionary index changing size
-    /// during iteration.
-    indices: Rc<RefCell<HashTable<usize>>>,
+    /// Hash table mapping from entry hash to its index in the entries vector.
+    indices: HashTable<usize>,
     /// entries is a dense vec maintaining entry order.
     entries: Vec<DictEntry>,
     /// True if any key or value in the dict is a `Value::Ref`. Used to skip iteration
@@ -90,7 +85,7 @@ impl Dict {
 
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            indices: Rc::new(RefCell::new(HashTable::with_capacity(capacity))),
+            indices: HashTable::with_capacity(capacity),
             entries: Vec::with_capacity(capacity),
             contains_refs: false,
         }
@@ -181,7 +176,6 @@ impl Dict {
 
         // Find entry with matching hash and key
         self.indices
-            .borrow()
             .find(hash, |&idx| {
                 let entry_key = &self.entries[idx].key;
                 match entry_key {
@@ -244,7 +238,8 @@ impl Dict {
             // Key doesn't exist, add new pair to indices and entries
             let index = self.entries.len();
             self.entries.push(entry);
-            borrow_indices_mut(&self.indices)?.insert_unique(hash, index, |index| self.entries[*index].hash);
+            self.indices
+                .insert_unique(hash, index, |index| self.entries[*index].hash);
             Ok(None)
         }
     }
@@ -296,13 +291,6 @@ impl Dict {
             let index = this.entries.len();
             this.entries.push(entry);
             this.indices
-                .try_borrow_mut()
-                .map_err(|_| {
-                    SimpleException::new(
-                        ExcType::ValueError,
-                        Some("dictionary indices cannot change during iteration".into()),
-                    )
-                })?
                 .insert_unique(hash, index, |index| this.entries[*index].hash);
             Ok(None)
         }
@@ -325,8 +313,7 @@ impl Dict {
             .py_hash(heap, interns)?
             .ok_or_else(|| ExcType::type_error_unhashable_dict_key(key.py_type(heap)))?;
 
-        let mut indices = borrow_indices_mut(&self.indices)?;
-        let entry = indices.entry(
+        let entry = self.indices.entry(
             hash,
             |v| key.py_eq(&self.entries[*v].key, heap, interns).unwrap_or(false),
             |index| self.entries[*index].hash,
@@ -452,7 +439,6 @@ impl Dict {
         // the key lookup fails but doesn't crash.
         let opt_index = self
             .indices
-            .borrow()
             .find(hash, |v| {
                 key.py_eq(&self.entries[*v].key, heap, interns).unwrap_or(false)
             })
@@ -470,30 +456,32 @@ impl Dict {
             .py_hash(reader.heap, interns)?
             .ok_or_else(|| ExcType::type_error_unhashable_dict_key(key.py_type(reader.heap)))?;
 
-        // Dict keys are typically shallow (strings, ints, tuples of primitives),
-        // so recursion errors are unlikely. If one occurs, treat it as "not equal" -
-        // the key lookup fails but doesn't crash.
-        let indices = Rc::clone(&this.get(reader).indices);
-        let opt_index = indices
-            .borrow()
-            .find(hash, |v| {
-                let key = this.get(reader).entries[*v].key.clone_with_heap(reader.heap);
-                defer_drop!(key, reader);
-                key.py_eq(key, reader.heap, interns).unwrap_or(false)
-            })
-            .copied();
-        Ok((opt_index, hash))
-    }
-}
+        // Collect candidate indices from the hash table's probe sequence.
+        // We call `find` with an always-false equality function to traverse the
+        // full probe chain, collecting indices of entries with matching hash.
+        // This avoids needing to hold a borrow on `indices` across py_eq calls
+        // (which require mutable heap access).
+        let mut candidates: SmallVec<[usize; 2]> = SmallVec::new();
+        this.get(reader).indices.find(hash, |&idx| {
+            if this.get(reader).entries[idx].hash == hash {
+                candidates.push(idx);
+            }
+            false
+        });
 
-fn borrow_indices_mut(indices: &RefCell<HashTable<usize>>) -> RunResult<RefMut<'_, HashTable<usize>>> {
-    indices.try_borrow_mut().map_err(|_| {
-        SimpleException::new(
-            ExcType::ValueError,
-            Some("dictionary indices cannot change during iteration".into()),
-        )
-        .into()
-    })
+        // Check key equality outside the hash table borrow, where we can freely
+        // access reader.heap for py_eq.
+        // Dict keys are typically shallow (strings, ints, tuples of primitives),
+        // so recursion errors are unlikely. If one occurs, treat it as "not equal".
+        for idx in candidates {
+            let entry_key = this.get(reader).entries[idx].key.clone_with_heap(reader.heap);
+            defer_drop!(entry_key, reader);
+            if key.py_eq(entry_key, reader.heap, interns).unwrap_or(false) {
+                return Ok((Some(idx), hash));
+            }
+        }
+        Ok((None, hash))
+    }
 }
 
 /// Iterator over borrowed (key, value) pairs in a dict.
@@ -572,9 +560,9 @@ impl PyTrait for Dict {
             defer_drop!(key, reader);
             let value = this.get(reader).entries[i].value.clone_with_heap(reader.heap);
             defer_drop!(value, reader);
-            if let Ok(Some(other_v)) = Self::get_via_reader(other, &key, reader, interns) {
+            if let Ok(Some(other_v)) = Self::get_via_reader(other, key, reader, interns) {
                 defer_drop!(other_v, reader);
-                if !value.py_eq(&other_v, reader.heap, interns)? {
+                if !value.py_eq(other_v, reader.heap, interns)? {
                     return Ok(false);
                 }
             } else {
@@ -780,7 +768,7 @@ fn dict_clear(dict: &mut Dict, heap: &mut Heap<impl ResourceTracker>) {
         entry.key.drop_with_heap(heap);
         entry.value.drop_with_heap(heap);
     }
-    dict.indices.borrow_mut().clear();
+    dict.indices.clear();
     // Note: contains_refs stays true even if all refs removed, per conservative GC strategy
 }
 
@@ -973,10 +961,9 @@ fn dict_popitem(dict: &mut Dict, heap: &mut Heap<impl ResourceTracker>) -> RunRe
     // (This is simpler than trying to find and remove the specific hash entry)
     // TODO: This O(n) rebuild could be optimized by finding and removing the
     // specific hash entry directly from the hashbrown table.
-    let mut indices = borrow_indices_mut(&dict.indices)?;
-    indices.clear();
+    dict.indices.clear();
     for (idx, e) in dict.entries.iter().enumerate() {
-        indices.insert_unique(e.hash, idx, |&i| dict.entries[i].hash);
+        dict.indices.insert_unique(e.hash, idx, |&i| dict.entries[i].hash);
     }
 
     // Create tuple (key, value)
@@ -1009,7 +996,7 @@ impl<'de> serde::Deserialize<'de> for Dict {
             indices.insert_unique(entry.hash, idx, |&i| fields.entries[i].hash);
         }
         Ok(Self {
-            indices: Rc::new(RefCell::new(indices)),
+            indices,
             entries: fields.entries,
             contains_refs: fields.contains_refs,
         })

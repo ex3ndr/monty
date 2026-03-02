@@ -68,7 +68,6 @@ impl Dataclass {
     /// * `field_names` - Declared field names in definition order
     /// * `attrs` - Dict of attribute name -> value pairs (ownership transferred)
     /// * `frozen` - Whether this dataclass instance is immutable (affects hashability)
-    #[must_use]
     pub fn new(
         name: impl Into<EitherStr>,
         type_id: u64,
@@ -106,6 +105,7 @@ impl Dataclass {
 
     /// Returns whether this dataclass contains any heap references (`Value::Ref`).
     #[inline]
+    #[expect(clippy::unused_self)]
     #[must_use]
     pub fn has_refs(&self) -> bool {
         // contains a dict

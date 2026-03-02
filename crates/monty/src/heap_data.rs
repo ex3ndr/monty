@@ -564,18 +564,6 @@ impl PyTrait for HeapDataMut<'_> {
         }
     }
 
-    fn py_mod_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
-        match (self, other) {
-            (Self::Str(a), Self::Str(b)) => a.py_mod_eq(b, right_value),
-            (Self::Bytes(a), Self::Bytes(b)) => a.py_mod_eq(b, right_value),
-            (Self::List(a), Self::List(b)) => a.py_mod_eq(b, right_value),
-            (Self::Tuple(a), Self::Tuple(b)) => a.py_mod_eq(b, right_value),
-            (Self::Dict(a), Self::Dict(b)) => a.py_mod_eq(b, right_value),
-            // Cells don't support arithmetic operations
-            _ => None,
-        }
-    }
-
     fn py_call_attr(
         &mut self,
         heap: &mut Heap<impl ResourceTracker>,
