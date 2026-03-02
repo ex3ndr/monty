@@ -8,7 +8,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::{ExcType, RunResult},
-    heap::{Heap, HeapId, HeapRead, HeapReader},
+    heap::{Heap, HeapData, HeapId, HeapRead, HeapReadOutput, HeapReader},
     intern::Interns,
     resource::{ResourceError, ResourceTracker},
     types::{AttrCallResult, Type},
@@ -53,7 +53,8 @@ pub(crate) struct Dataclass {
     /// Declared field names in definition order (for repr and hashing)
     field_names: Vec<String>,
     /// All attributes (both declared fields and dynamically added)
-    attrs: Dict,
+    /// Dict wrapped as value for heap management
+    attrs: HeapId,
     /// Whether this dataclass instance is immutable (affects hashability)
     frozen: bool,
 }
@@ -68,14 +69,21 @@ impl Dataclass {
     /// * `attrs` - Dict of attribute name -> value pairs (ownership transferred)
     /// * `frozen` - Whether this dataclass instance is immutable (affects hashability)
     #[must_use]
-    pub fn new(name: impl Into<EitherStr>, type_id: u64, field_names: Vec<String>, attrs: Dict, frozen: bool) -> Self {
-        Self {
+    pub fn new(
+        name: impl Into<EitherStr>,
+        type_id: u64,
+        field_names: Vec<String>,
+        attrs: Dict,
+        frozen: bool,
+        heap: &mut Heap<impl ResourceTracker>,
+    ) -> Result<Self, ResourceError> {
+        Ok(Self {
             name: name.into(),
             type_id,
             field_names,
-            attrs,
+            attrs: heap.allocate(HeapData::Dict(attrs))?,
             frozen,
-        }
+        })
     }
 
     /// Returns the class name.
@@ -97,18 +105,11 @@ impl Dataclass {
     }
 
     /// Returns whether this dataclass contains any heap references (`Value::Ref`).
-    ///
-    /// Delegates to the underlying attrs Dict.
     #[inline]
     #[must_use]
     pub fn has_refs(&self) -> bool {
-        self.attrs.has_refs()
-    }
-
-    /// Returns a reference to the attrs Dict.
-    #[must_use]
-    pub fn attrs(&self) -> &Dict {
-        &self.attrs
+        // contains a dict
+        true
     }
 
     /// Returns whether this dataclass instance is frozen (immutable).
@@ -124,25 +125,25 @@ impl Dataclass {
     /// is a new attribute.
     ///
     /// Returns `FrozenInstanceError` if the dataclass is frozen.
-    pub fn set_attr(
-        &mut self,
+    pub fn set_attr<'a>(
+        this: &mut HeapRead<'a, Self>,
         name: Value,
         value: Value,
-        heap: &mut Heap<impl ResourceTracker>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         interns: &Interns,
     ) -> RunResult<Option<Value>> {
-        if self.frozen {
+        if this.get(reader).frozen {
             // Get attribute name for error message
             let attr_name = match &name {
                 Value::InternString(id) => interns.get_str(*id).to_string(),
                 _ => "<unknown>".to_string(),
             };
             // Drop the values we were given ownership of
-            name.drop_with_heap(heap);
-            value.drop_with_heap(heap);
+            name.drop_with_heap(reader.heap);
+            value.drop_with_heap(reader.heap);
             return Err(ExcType::frozen_instance_error(&attr_name));
         }
-        self.attrs.set(name, value, heap, interns)
+        Dict::set_via_reader(&mut Self::attrs_reader(this, reader), name, value, reader, interns)
     }
 
     /// Computes the hash for this dataclass if it's frozen.
@@ -172,19 +173,44 @@ impl Dataclass {
         this.get(reader).name.hash(&mut hasher);
         // Hash each declared field (name, value) pair in order
         let field_count = this.get(reader).field_names.len();
+
+        let attrs = Self::attrs_reader(this, reader);
+
         for i in 0..field_count {
             let field_name = &this.get(reader).field_names[i];
             field_name.hash(&mut hasher);
-            if let Some(value) = this.get(reader).attrs.get_by_str(field_name, reader.heap, interns) {
-                let value = value.clone_with_heap(reader.heap);
-                defer_drop!(value, reader);
-                match value.py_hash(reader.heap, interns)? {
-                    Some(h) => h.hash(&mut hasher),
-                    None => return Ok(None),
-                }
+            let Some(value) = attrs
+                .get(reader)
+                .get_by_str(field_name, reader.heap, interns)
+                .map(|v| v.clone_with_heap(reader.heap))
+            else {
+                continue; // Missing field value - TODO should this be an error?
+            };
+            defer_drop!(value, reader);
+            match value.py_hash(reader.heap, interns)? {
+                Some(h) => h.hash(&mut hasher),
+                None => return Ok(None),
             }
         }
         Ok(Some(hasher.finish()))
+    }
+
+    pub fn attrs_dict(&self) -> HeapId {
+        self.attrs
+    }
+
+    pub fn traverse(&self, work_list: &mut Vec<HeapId>) {
+        work_list.push(self.attrs);
+    }
+
+    fn attrs_reader<'a>(
+        this: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
+    ) -> HeapRead<'a, Dict> {
+        let HeapReadOutput::Dict(attrs) = reader.read(this.get(reader).attrs) else {
+            panic!("Dataclass attrs is not a Dict");
+        };
+        attrs
     }
 }
 
@@ -197,7 +223,6 @@ impl PyTrait for Dataclass {
         std::mem::size_of::<Self>()
             + self.name.py_estimate_size()
             + self.field_names.iter().map(String::len).sum::<usize>()
-            + self.attrs.py_estimate_size()
     }
 
     fn py_len(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> Option<usize> {
@@ -205,19 +230,20 @@ impl PyTrait for Dataclass {
         None
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
+    fn py_eq<'a>(
+        this: &HeapRead<'a, Self>,
+        other: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         interns: &Interns,
     ) -> Result<bool, ResourceError> {
         // Dataclasses are equal if they have the same name and equal attrs
-        Ok(self.name == other.name && self.attrs.py_eq(&other.attrs, heap, interns)?)
+        let self_attrs = Self::attrs_reader(this, reader);
+        let other_attrs = Self::attrs_reader(other, reader);
+        Ok(this.get(reader).name == other.get(reader).name && Dict::py_eq(&self_attrs, &other_attrs, reader, interns)?)
     }
 
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
-        // Delegate to the attrs Dict which handles all nested heap references
-        self.attrs.py_dec_ref_ids(stack);
+        self.traverse(stack);
     }
 
     fn py_bool(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> bool {
@@ -254,8 +280,12 @@ impl PyTrait for Dataclass {
             f.write_str(field_name)?;
             f.write_char('=')?;
 
+            let HeapData::Dict(attrs) = heap.get(self.attrs) else {
+                panic!("Dataclass attrs is not a Dict");
+            };
+
             // Look up value in attrs
-            if let Some(value) = self.attrs.get_by_str(field_name, heap, interns) {
+            if let Some(value) = attrs.get_by_str(field_name, heap, interns) {
                 value.py_repr_fmt(f, heap, heap_ids, interns)?;
             } else {
                 // Field not found - shouldn't happen for well-formed dataclasses
@@ -281,8 +311,12 @@ impl PyTrait for Dataclass {
         let method_name = attr.as_str(interns);
         defer_drop!(args, heap);
 
+        let HeapData::Dict(attrs) = heap.get(self.attrs) else {
+            panic!("Dataclass attrs is not a Dict");
+        };
+
         // If the attribute exists in attrs, it's a data value (not callable)
-        if let Some(value) = self.attrs.get_by_str(method_name, heap, interns) {
+        if let Some(value) = attrs.get_by_str(method_name, heap, interns) {
             let type_name = value.py_type(heap);
             Err(ExcType::type_error_not_callable_object(type_name))
         } else {
@@ -305,7 +339,10 @@ impl PyTrait for Dataclass {
     ) -> RunResult<AttrCallResult> {
         let attr_str = attr.as_str(vm.interns);
         // Only public methods (no underscore prefix = no dunders, no private)
-        if !attr_str.starts_with('_') && self.attrs.get_by_str(attr_str, vm.heap, vm.interns).is_none() {
+        let HeapData::Dict(attrs) = vm.heap.get(self.attrs) else {
+            panic!("Dataclass attrs is not a Dict");
+        };
+        if !attr_str.starts_with('_') && attrs.get_by_str(attr_str, vm.heap, vm.interns).is_none() {
             // Clone self and prepend to args for the method call
             // inc_ref works even when data is taken out (refcount metadata is separate)
             vm.heap.inc_ref(self_id);
@@ -326,7 +363,10 @@ impl PyTrait for Dataclass {
         interns: &Interns,
     ) -> RunResult<Option<AttrCallResult>> {
         let attr_name = attr.as_str(interns);
-        match self.attrs.get_by_str(attr_name, heap, interns) {
+        let HeapData::Dict(attrs) = heap.get(self.attrs) else {
+            panic!("Dataclass attrs is not a Dict");
+        };
+        match attrs.get_by_str(attr_name, heap, interns) {
             Some(value) => Ok(Some(AttrCallResult::Value(value.clone_with_heap(heap)))),
             // we use name here, not `self.py_type(heap)` hence returning a Ok(None)
             None => Err(ExcType::attribute_error(self.name(interns), attr_name)),
@@ -356,7 +396,7 @@ impl<'de> serde::Deserialize<'de> for Dataclass {
             name: EitherStr,
             type_id: u64,
             field_names: Vec<String>,
-            attrs: Dict,
+            attrs: HeapId,
             frozen: bool,
         }
         let dc = DataclassData::deserialize(deserializer)?;

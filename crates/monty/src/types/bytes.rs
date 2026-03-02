@@ -287,13 +287,13 @@ impl PyTrait for Bytes {
         Ok(Value::Int(i64::from(byte)))
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
+    fn py_eq<'a>(
+        this: &HeapRead<'a, Self>,
+        other: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         _interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        Ok(self.0 == other.0)
+        Ok(this.get(reader).0 == other.get(reader).0)
     }
 
     /// Bytes don't contain nested heap references.

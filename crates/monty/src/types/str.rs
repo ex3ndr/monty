@@ -247,13 +247,13 @@ impl PyTrait for Str {
         Ok(allocate_char(c, reader.heap)?)
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
+    fn py_eq<'a>(
+        this: &HeapRead<'a, Self>,
+        other: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         _interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        Ok(self.0 == other.0)
+        Ok(this.get(reader).0 == other.get(reader).0)
     }
 
     /// Interns don't contain nested heap references.

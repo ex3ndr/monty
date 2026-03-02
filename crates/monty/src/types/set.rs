@@ -178,19 +178,7 @@ impl SetStorage {
             }
         };
 
-        // Clone the Rc to avoid borrow conflicts between the HeapRead and the
-        // closure that needs to read entries for equality checks.
-        let indices = Rc::clone(&this.get(reader).indices);
-        let existing = indices
-            .borrow()
-            .find(hash, |&idx| {
-                let item = this.get(reader).entries[idx].value.clone_with_heap(reader.heap);
-                defer_drop!(item, reader);
-                value.py_eq(item, reader.heap, interns).unwrap_or(false)
-            })
-            .is_some();
-
-        if existing {
+        if Self::contains_known_hash(&this, &value, hash, reader, interns)? {
             // Value already in set, drop the new value
             value.drop_with_heap(reader.heap);
             Ok(false)
@@ -317,6 +305,43 @@ impl SetStorage {
             .is_some())
     }
 
+    /// Checks if the set contains a value.
+    pub fn contains_via_reader<'a>(
+        this: &HeapRead<'a, Self>,
+        value: &Value,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
+        interns: &Interns,
+    ) -> RunResult<bool> {
+        let hash = value
+            .py_hash(reader.heap, interns)?
+            .ok_or_else(|| ExcType::type_error_unhashable_set_element(value.py_type(reader.heap)))?;
+
+        Self::contains_known_hash(this, value, hash, reader, interns)
+    }
+
+    /// Checks if the set contains a value, given a known hash (to avoid recomputing it).
+    fn contains_known_hash<'a>(
+        this: &HeapRead<'a, Self>,
+        value: &Value,
+        hash: u64,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
+        interns: &Interns,
+    ) -> RunResult<bool> {
+        // Set values are typically shallow (strings, ints, tuples of primitives),
+        // so recursion errors are unlikely. If one occurs, treat it as "not equal".
+        // Clone the Rc to avoid borrow conflicts between the HeapRead and the
+        // closure that needs to read entries for equality checks.
+        let indices = Rc::clone(&this.get(reader).indices);
+        Ok(indices
+            .borrow()
+            .find(hash, |&idx| {
+                let item = this.get(reader).entries[idx].value.clone_with_heap(reader.heap);
+                defer_drop!(item, reader);
+                value.py_eq(item, reader.heap, interns).unwrap_or(false)
+            })
+            .is_some())
+    }
+
     /// Returns an iterator over the values in the set.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Value> {
         self.entries.iter().map(|e| &e.value)
@@ -341,21 +366,24 @@ impl SetStorage {
     }
 
     /// Compares two sets for equality.
-    fn eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
+    fn eq<'a>(
+        this: &HeapRead<'a, Self>,
+        other: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        if self.len() != other.len() {
+        if this.get(reader).len() != other.get(reader).len() {
             return Ok(false);
         }
 
-        let token = heap.incr_recursion_depth()?;
-        defer_drop!(token, heap);
+        let token = reader.heap.incr_recursion_depth()?;
+        defer_drop!(token, reader);
         // Check that every element in self is in other
-        for entry in &self.entries {
-            if !matches!(other.contains(&entry.value, heap, interns), Ok(true)) {
+        let entry_count = this.get(reader).entries.len();
+        for i in 0..entry_count {
+            let entry = this.get(reader).entries[i].value.clone_with_heap(reader.heap);
+            defer_drop!(entry, reader);
+            if !matches!(Self::contains_via_reader(other, &entry, reader, interns), Ok(true)) {
                 return Ok(false);
             }
         }
@@ -592,7 +620,7 @@ impl Set {
         reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         interns: &Interns,
     ) -> RunResult<bool> {
-        SetStorage::add_via_reader(HeapRead::peel(this), value, reader, interns)
+        SetStorage::add_via_reader(this.peel(), value, reader, interns)
     }
 
     /// Removes an element from the set.
@@ -697,13 +725,13 @@ impl PyTrait for Set {
         Some(self.len())
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
+    fn py_eq<'a>(
+        this: &HeapRead<'a, Self>,
+        other: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        self.0.eq(&other.0, heap, interns)
+        SetStorage::eq(this.peel_ref(), other.peel_ref(), reader, interns)
     }
 
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
@@ -1202,13 +1230,13 @@ impl PyTrait for FrozenSet {
         Some(self.len())
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
+    fn py_eq<'a>(
+        this: &HeapRead<'a, Self>,
+        other: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        self.0.eq(&other.0, heap, interns)
+        SetStorage::eq(this.peel_ref(), other.peel_ref(), reader, interns)
     }
 
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {

@@ -37,7 +37,7 @@ use crate::{
     heap_data::HeapDataMut,
     intern::{BytesId, Interns, StringId},
     resource::ResourceTracker,
-    types::{PyTrait, Range, str::allocate_char},
+    types::{Range, str::allocate_char},
     value::Value,
 };
 

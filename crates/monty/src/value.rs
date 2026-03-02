@@ -17,13 +17,13 @@ use crate::{
     asyncio::CallId,
     builtins::Builtins,
     exception_private::{ExcType, RunError, RunResult, SimpleException},
-    heap::{Heap, HeapData, HeapId, HeapReader},
+    heap::{DropWithHeap, Heap, HeapData, HeapId, HeapReadOutput, HeapReader},
     heap_data::HeapDataMut,
     intern::{BytesId, ExtFunctionId, FunctionId, Interns, LongIntId, StaticStrings, StringId},
     modules::ModuleFunctions,
     resource::{ResourceError, ResourceTracker, check_div_size, check_lshift_size, check_pow_size, check_repeat_size},
     types::{
-        AttrCallResult, LongInt, Property, PyTrait, Str, Type,
+        AttrCallResult, Dataclass, LongInt, Property, PyTrait, Str, Type,
         bytes::{bytes_repr_fmt, get_byte_at_index, get_bytes_slice},
         path,
         str::{allocate_char, get_char_at_index, get_str_slice, string_repr_fmt},
@@ -224,10 +224,14 @@ impl Value {
 
             (Self::Ref(id1), Self::Ref(id2)) => {
                 if *id1 == *id2 {
+                    // equal identity is always true
                     return Ok(true);
                 }
-                // Need to use with_two for proper borrow management
-                heap.with_two(*id1, *id2, |heap, left, right| left.py_eq(right, heap, interns))
+                HeapReader::with(heap, |reader| {
+                    let left = reader.read(*id1);
+                    let right = reader.read(*id2);
+                    left.py_eq(&right, reader, interns)
+                })
             }
 
             // Builtins equality - just check the enums are equal
@@ -1690,31 +1694,19 @@ impl Value {
         let attr_name = interns.get_str(name_id);
 
         if let Self::Ref(heap_id) = self {
-            let heap_id = *heap_id;
-            let is_dataclass = matches!(heap.get(heap_id), HeapData::Dataclass(_));
-
-            if is_dataclass {
-                let name_value = Self::InternString(name_id);
-                heap.with_entry_mut(heap_id, |heap, data| {
-                    if let HeapDataMut::Dataclass(dc) = data {
-                        match dc.set_attr(name_value, value, heap, interns) {
-                            Ok(old_value) => {
-                                if let Some(old) = old_value {
-                                    old.drop_with_heap(heap);
-                                }
-                                Ok(())
-                            }
-                            Err(e) => Err(e),
-                        }
-                    } else {
-                        unreachable!("type changed during borrow")
-                    }
-                })
-            } else {
-                let type_name = heap.get(heap_id).py_type(heap);
-                value.drop_with_heap(heap);
-                Err(ExcType::attribute_error_no_setattr(type_name, attr_name))
-            }
+            HeapReader::with(heap, |reader| match reader.read(*heap_id) {
+                HeapReadOutput::Dataclass(mut dc) => {
+                    let name_value = Self::InternString(name_id);
+                    let old_value = Dataclass::set_attr(&mut dc, name_value, value, reader, interns)?;
+                    old_value.drop_with_heap(reader.heap);
+                    Ok(())
+                }
+                other => {
+                    let py_type = other.py_type(reader);
+                    value.drop_with_heap(reader.heap);
+                    Err(ExcType::attribute_error_no_setattr(py_type, attr_name))
+                }
+            })
         } else {
             let type_name = self.py_type(heap);
             value.drop_with_heap(heap);

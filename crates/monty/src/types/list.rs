@@ -331,21 +331,25 @@ impl PyTrait for List {
         Ok(())
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
+    fn py_eq<'a>(
+        this: &HeapRead<'a, Self>,
+        other: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        if self.items.len() != other.items.len() {
+        if this.get(reader).items.len() != other.get(reader).items.len() {
             return Ok(false);
         }
-        let token = heap.incr_recursion_depth()?;
-        defer_drop!(token, heap);
+        let token = reader.heap.incr_recursion_depth()?;
+        defer_drop!(token, reader);
 
-        for (i1, i2) in self.items.iter().zip(&other.items) {
-            heap.check_time()?;
-            if !i1.py_eq(i2, heap, interns)? {
+        for i in 0..this.get(reader).items.len() {
+            reader.heap.check_time()?;
+            let i1 = this.get(reader).items[i].clone_with_heap(reader.heap);
+            defer_drop!(i1, reader);
+            let i2 = other.get(reader).items[i].clone_with_heap(reader.heap);
+            defer_drop!(i2, reader);
+            if !i1.py_eq(i2, reader.heap, interns)? {
                 return Ok(false);
             }
         }

@@ -241,12 +241,8 @@ impl HeapData {
     }
 }
 
-/// Manual implementation of AbstractValue dispatch for HeapData.
-///
-/// This provides efficient dispatch without boxing overhead by matching on
-/// the enum variant and delegating to the inner type's implementation.
-impl PyTrait for HeapData {
-    fn py_type(&self, heap: &Heap<impl ResourceTracker>) -> Type {
+impl HeapData {
+    pub fn py_type(&self, heap: &Heap<impl ResourceTracker>) -> Type {
         match self {
             Self::Str(s) => s.py_type(heap),
             Self::Bytes(b) => b.py_type(heap),
@@ -306,7 +302,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_len(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Option<usize> {
+    pub fn py_len(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Option<usize> {
         match self {
             Self::Str(s) => PyTrait::py_len(s, heap, interns),
             Self::Bytes(b) => PyTrait::py_len(b, heap, interns),
@@ -330,58 +326,6 @@ impl PyTrait for HeapData {
             | Self::Coroutine(_)
             | Self::GatherFuture(_)
             | Self::Path(_) => None,
-        }
-    }
-
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
-    ) -> Result<bool, ResourceError> {
-        match (self, other) {
-            (Self::Str(a), Self::Str(b)) => a.py_eq(b, heap, interns),
-            (Self::Bytes(a), Self::Bytes(b)) => a.py_eq(b, heap, interns),
-            (Self::List(a), Self::List(b)) => a.py_eq(b, heap, interns),
-            (Self::Tuple(a), Self::Tuple(b)) => a.py_eq(b, heap, interns),
-            (Self::NamedTuple(a), Self::NamedTuple(b)) => a.py_eq(b, heap, interns),
-            // NamedTuple can compare with Tuple by elements (matching CPython behavior)
-            (Self::NamedTuple(nt), Self::Tuple(t)) | (Self::Tuple(t), Self::NamedTuple(nt)) => {
-                let nt_items = nt.as_vec();
-                let t_items = t.as_slice();
-                if nt_items.len() != t_items.len() {
-                    return Ok(false);
-                }
-                let token = heap.incr_recursion_depth()?;
-                crate::defer_drop!(token, heap);
-                for (a, b) in nt_items.iter().zip(t_items.iter()) {
-                    if !a.py_eq(b, heap, interns)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            (Self::Dict(a), Self::Dict(b)) => a.py_eq(b, heap, interns),
-            (Self::Set(a), Self::Set(b)) => a.py_eq(b, heap, interns),
-            (Self::FrozenSet(a), Self::FrozenSet(b)) => a.py_eq(b, heap, interns),
-            (Self::Closure(a), Self::Closure(b)) => Ok(a.func_id == b.func_id && a.cells == b.cells),
-            (Self::FunctionDefaults(a), Self::FunctionDefaults(b)) => Ok(a.func_id == b.func_id),
-            (Self::Range(a), Self::Range(b)) => a.py_eq(b, heap, interns),
-            (Self::Dataclass(a), Self::Dataclass(b)) => a.py_eq(b, heap, interns),
-            // LongInt equality
-            (Self::LongInt(a), Self::LongInt(b)) => Ok(a == b),
-            // Slice equality
-            (Self::Slice(a), Self::Slice(b)) => a.py_eq(b, heap, interns),
-            // Path equality
-            (Self::Path(a), Self::Path(b)) => a.py_eq(b, heap, interns),
-            // Cells, Exceptions, Iterators, Modules, and async types compare by identity only (handled at Value level via HeapId comparison)
-            (Self::Cell(_), Self::Cell(_))
-            | (Self::Exception(_), Self::Exception(_))
-            | (Self::Iter(_), Self::Iter(_))
-            | (Self::Module(_), Self::Module(_))
-            | (Self::Coroutine(_), Self::Coroutine(_))
-            | (Self::GatherFuture(_), Self::GatherFuture(_)) => Ok(false),
-            _ => Ok(false), // Different types are never equal
         }
     }
 
@@ -438,7 +382,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_bool(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> bool {
+    pub fn py_bool(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> bool {
         match self {
             Self::Str(s) => s.py_bool(heap, interns),
             Self::Bytes(b) => b.py_bool(heap, interns),
@@ -463,7 +407,18 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_repr_fmt(
+    /// Returns the Python `repr()` string for this value.
+    ///
+    /// Convenience wrapper around `py_repr_fmt` that returns an owned string.
+    pub fn py_repr(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Cow<'static, str> {
+        let mut s = String::new();
+        let mut heap_ids = AHashSet::new();
+        // Unwrap is safe: writing to String never fails
+        self.py_repr_fmt(&mut s, heap, &mut heap_ids, interns).unwrap();
+        Cow::Owned(s)
+    }
+
+    pub fn py_repr_fmt(
         &self,
         f: &mut impl Write,
         heap: &Heap<impl ResourceTracker>,
@@ -500,7 +455,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_str(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Cow<'static, str> {
+    pub fn py_str(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Cow<'static, str> {
         match self {
             // Strings return their value directly without quotes
             Self::Str(s) => s.py_str(heap, interns),
@@ -515,7 +470,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_add(
+    pub fn py_add(
         &self,
         other: &Self,
         heap: &mut Heap<impl ResourceTracker>,
@@ -536,7 +491,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_sub(
+    pub fn py_sub(
         &self,
         other: &Self,
         heap: &mut Heap<impl ResourceTracker>,
@@ -558,7 +513,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_mod(
+    pub fn py_mod(
         &self,
         other: &Self,
         heap: &mut Heap<impl ResourceTracker>,
@@ -582,7 +537,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_mod_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
+    pub fn py_mod_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
         match (self, other) {
             (Self::Str(a), Self::Str(b)) => a.py_mod_eq(b, right_value),
             (Self::Bytes(a), Self::Bytes(b)) => a.py_mod_eq(b, right_value),
@@ -594,7 +549,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_iadd(
+    pub fn py_iadd(
         &mut self,
         other: Value,
         heap: &mut Heap<impl ResourceTracker>,
@@ -615,7 +570,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_call_attr(
+    pub fn py_call_attr(
         &mut self,
         heap: &mut Heap<impl ResourceTracker>,
         attr: &EitherStr,
@@ -636,7 +591,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_call_attr_raw(
+    pub fn py_call_attr_raw(
         &mut self,
         self_id: HeapId,
         vm: &mut VM<'_, '_, impl ResourceTracker>,
@@ -659,7 +614,7 @@ impl PyTrait for HeapData {
         }
     }
 
-    fn py_getattr(
+    pub fn py_getattr(
         &self,
         attr: &EitherStr,
         heap: &mut Heap<impl ResourceTracker>,
@@ -855,6 +810,7 @@ pub enum HeapReadOutput<'a> {
     Path(HeapRead<'a, Path>),
 }
 
+#[repr(transparent)]
 pub struct HeapRead<'a, T: ?Sized> {
     value: NonNull<T>,
     /// Makes the lifetime `'a` invariant. In combination with the invariant lifetime
@@ -904,6 +860,15 @@ impl<'a, T: ?Sized> HeapRead<'a, T> {
             value: NonNull::cast(self.value),
             borrow: PhantomData,
         }
+    }
+
+    pub fn peel_ref<U>(&self) -> &HeapRead<'a, U>
+    where
+        T: TransparentWrapper<U>,
+    {
+        // SAFETY: this is safe for the same reason peel() is safe, and all `HeapRead` have
+        // the same layout (transparent wrapper around a pointer)
+        unsafe { NonNull::cast(self.into()).as_ref() }
     }
 }
 
@@ -1870,17 +1835,7 @@ fn collect_child_ids(data: &HeapData, work_list: &mut Vec<HeapId>) {
                 work_list.push(*id);
             }
         }
-        HeapData::Dataclass(dc) => {
-            // Dataclass attrs are stored in a Dict - iterate through entries
-            for (k, v) in dc.attrs() {
-                if let Value::Ref(id) = k {
-                    work_list.push(*id);
-                }
-                if let Value::Ref(id) = v {
-                    work_list.push(*id);
-                }
-            }
-        }
+        HeapData::Dataclass(dc) => dc.traverse(work_list),
         HeapData::Iter(iter) => {
             // Iterator holds a reference to the iterable being iterated
             if let Value::Ref(id) = iter.value() {

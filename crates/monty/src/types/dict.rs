@@ -553,23 +553,28 @@ impl PyTrait for Dict {
         Some(self.len())
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
+    fn py_eq<'a>(
+        this: &HeapRead<'a, Self>,
+        other: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        if self.len() != other.len() {
+        if this.get(reader).len() != other.get(reader).len() {
             return Ok(false);
         }
 
-        let token = heap.incr_recursion_depth()?;
-        defer_drop!(token, heap);
+        let token = reader.heap.incr_recursion_depth()?;
+        defer_drop!(token, reader);
         // Check that all keys in self exist in other with equal values
-        for entry in &self.entries {
-            heap.check_time()?;
-            if let Ok(Some(other_v)) = other.get(&entry.key, heap, interns) {
-                if !entry.value.py_eq(other_v, heap, interns)? {
+        for i in 0..this.get(reader).entries.len() {
+            reader.heap.check_time()?;
+            let key = this.get(reader).entries[i].key.clone_with_heap(reader.heap);
+            defer_drop!(key, reader);
+            let value = this.get(reader).entries[i].value.clone_with_heap(reader.heap);
+            defer_drop!(value, reader);
+            if let Ok(Some(other_v)) = Self::get_via_reader(other, &key, reader, interns) {
+                defer_drop!(other_v, reader);
+                if !value.py_eq(&other_v, reader.heap, interns)? {
                     return Ok(false);
                 }
             } else {

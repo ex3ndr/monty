@@ -253,16 +253,18 @@ impl PyTrait for Range {
         Ok(Value::Int(offset))
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
+    fn py_eq<'a>(
+        this: &HeapRead<'a, Self>,
+        other: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         _interns: &Interns,
     ) -> Result<bool, ResourceError> {
         // Compare ranges by their actual sequences, not parameters.
         // Two ranges are equal if they produce the same elements.
-        let len1 = self.len();
-        let len2 = other.len();
+        let a = this.get(reader);
+        let b = other.get(reader);
+        let len1 = a.len();
+        let len2 = b.len();
         if len1 != len2 {
             return Ok(false);
         }
@@ -270,7 +272,7 @@ impl PyTrait for Range {
         if len1 == 0 {
             return Ok(true); // Both empty
         }
-        Ok(self.start == other.start && self.step == other.step)
+        Ok(a.start == b.start && a.step == b.step)
     }
 
     fn py_bool(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> bool {

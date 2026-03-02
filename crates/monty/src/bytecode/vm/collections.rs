@@ -10,7 +10,7 @@ use crate::{
     heap_data::HeapDataMut,
     intern::StringId,
     resource::ResourceTracker,
-    types::{Dict, List, PyTrait, Set, Slice, Type, allocate_tuple, slice::value_to_option_i64, str::allocate_char},
+    types::{Dict, List, Set, Slice, Type, allocate_tuple, slice::value_to_option_i64, str::allocate_char},
     value::Value,
 };
 

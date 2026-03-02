@@ -11,7 +11,7 @@ use crate::{
     args::ArgValues,
     defer_drop,
     exception_private::{ExcType, RunResult},
-    heap::{Heap, HeapData, HeapId},
+    heap::{Heap, HeapData, HeapId, HeapRead, HeapReader},
     intern::{Interns, StaticStrings},
     resource::{ResourceError, ResourceTracker},
     types::{AttrCallResult, PyTrait, Type},
@@ -190,13 +190,15 @@ impl PyTrait for Slice {
         None
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        _heap: &mut Heap<impl ResourceTracker>,
+    fn py_eq<'a>(
+        this: &HeapRead<'a, Self>,
+        other: &HeapRead<'a, Self>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         _interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        Ok(self.start == other.start && self.stop == other.stop && self.step == other.step)
+        let a = this.get(reader);
+        let b = other.get(reader);
+        Ok(a.start == b.start && a.stop == b.stop && a.step == b.step)
     }
 
     fn py_bool(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> bool {

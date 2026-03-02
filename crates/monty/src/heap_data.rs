@@ -357,56 +357,14 @@ impl PyTrait for HeapDataMut<'_> {
         }
     }
 
-    fn py_eq(
-        &self,
-        other: &Self,
-        heap: &mut Heap<impl ResourceTracker>,
-        interns: &Interns,
+    fn py_eq<'a>(
+        _this: &crate::heap::HeapRead<'a, Self>,
+        _other: &crate::heap::HeapRead<'a, Self>,
+        _reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
+        _interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        match (self, other) {
-            (Self::Str(a), Self::Str(b)) => a.py_eq(b, heap, interns),
-            (Self::Bytes(a), Self::Bytes(b)) => a.py_eq(b, heap, interns),
-            (Self::List(a), Self::List(b)) => a.py_eq(b, heap, interns),
-            (Self::Tuple(a), Self::Tuple(b)) => a.py_eq(b, heap, interns),
-            (Self::NamedTuple(a), Self::NamedTuple(b)) => a.py_eq(b, heap, interns),
-            // NamedTuple can compare with Tuple by elements (matching CPython behavior)
-            (Self::NamedTuple(nt), Self::Tuple(t)) | (Self::Tuple(t), Self::NamedTuple(nt)) => {
-                let nt_items = nt.as_vec();
-                let t_items = t.as_slice();
-                if nt_items.len() != t_items.len() {
-                    return Ok(false);
-                }
-                let token = heap.incr_recursion_depth()?;
-                crate::defer_drop!(token, heap);
-                for (a, b) in nt_items.iter().zip(t_items.iter()) {
-                    if !a.py_eq(b, heap, interns)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            (Self::Dict(a), Self::Dict(b)) => a.py_eq(b, heap, interns),
-            (Self::Set(a), Self::Set(b)) => a.py_eq(b, heap, interns),
-            (Self::FrozenSet(a), Self::FrozenSet(b)) => a.py_eq(b, heap, interns),
-            (Self::Closure(a), Self::Closure(b)) => Ok(a.func_id == b.func_id && a.cells == b.cells),
-            (Self::FunctionDefaults(a), Self::FunctionDefaults(b)) => Ok(a.func_id == b.func_id),
-            (Self::Range(a), Self::Range(b)) => a.py_eq(b, heap, interns),
-            (Self::Dataclass(a), Self::Dataclass(b)) => a.py_eq(b, heap, interns),
-            // LongInt equality
-            (Self::LongInt(a), Self::LongInt(b)) => Ok(a == b),
-            // Slice equality
-            (Self::Slice(a), Self::Slice(b)) => a.py_eq(b, heap, interns),
-            // Path equality
-            (Self::Path(a), Self::Path(b)) => a.py_eq(b, heap, interns),
-            // Cells, Exceptions, Iterators, Modules, and async types compare by identity only (handled at Value level via HeapId comparison)
-            (Self::Cell(_), Self::Cell(_))
-            | (Self::Exception(_), Self::Exception(_))
-            | (Self::Iter(_), Self::Iter(_))
-            | (Self::Module(_), Self::Module(_))
-            | (Self::Coroutine(_), Self::Coroutine(_))
-            | (Self::GatherFuture(_), Self::GatherFuture(_)) => Ok(false),
-            _ => Ok(false), // Different types are never equal
-        }
+        // Equality for heap data is handled via HeapReadOutput::py_eq, not through HeapDataMut
+        unreachable!("py_eq should not be called on HeapDataMut directly")
     }
 
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
@@ -703,6 +661,66 @@ impl PyTrait for HeapDataMut<'_> {
 }
 
 impl<'a> HeapReadOutput<'a> {
+    pub fn py_eq(
+        &self,
+        other: &Self,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
+        interns: &Interns,
+    ) -> Result<bool, ResourceError> {
+        match (self, other) {
+            (Self::Str(a), Self::Str(b)) => Str::py_eq(a, b, reader, interns),
+            (Self::Bytes(a), Self::Bytes(b)) => Bytes::py_eq(a, b, reader, interns),
+            (Self::List(a), Self::List(b)) => List::py_eq(a, b, reader, interns),
+            (Self::Tuple(a), Self::Tuple(b)) => Tuple::py_eq(a, b, reader, interns),
+            (Self::NamedTuple(a), Self::NamedTuple(b)) => NamedTuple::py_eq(a, b, reader, interns),
+            // NamedTuple can compare with Tuple by elements (matching CPython behavior)
+            (Self::NamedTuple(nt), Self::Tuple(t)) | (Self::Tuple(t), Self::NamedTuple(nt)) => {
+                let nt_len = nt.get(reader).as_vec().len();
+                let t_len = t.get(reader).as_slice().len();
+                if nt_len != t_len {
+                    return Ok(false);
+                }
+                let token = reader.heap.incr_recursion_depth()?;
+                crate::defer_drop!(token, reader);
+                for i in 0..nt_len {
+                    let a = nt.get(reader).as_vec()[i].clone_with_heap(reader.heap);
+                    crate::defer_drop!(a, reader);
+                    let b = t.get(reader).as_slice()[i].clone_with_heap(reader.heap);
+                    crate::defer_drop!(b, reader);
+                    if !a.py_eq(b, reader.heap, interns)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            (Self::Dict(a), Self::Dict(b)) => Dict::py_eq(a, b, reader, interns),
+            (Self::Set(a), Self::Set(b)) => Set::py_eq(a, b, reader, interns),
+            (Self::FrozenSet(a), Self::FrozenSet(b)) => FrozenSet::py_eq(a, b, reader, interns),
+            (Self::Closure(a), Self::Closure(b)) => {
+                Ok(a.get(reader).func_id == b.get(reader).func_id && a.get(reader).cells == b.get(reader).cells)
+            }
+            (Self::FunctionDefaults(a), Self::FunctionDefaults(b)) => {
+                Ok(a.get(reader).func_id == b.get(reader).func_id)
+            }
+            (Self::Range(a), Self::Range(b)) => Range::py_eq(a, b, reader, interns),
+            (Self::Dataclass(a), Self::Dataclass(b)) => Dataclass::py_eq(a, b, reader, interns),
+            // LongInt equality
+            (Self::LongInt(a), Self::LongInt(b)) => Ok(a.get(reader) == b.get(reader)),
+            // Slice equality
+            (Self::Slice(a), Self::Slice(b)) => Slice::py_eq(a, b, reader, interns),
+            // Path equality
+            (Self::Path(a), Self::Path(b)) => Path::py_eq(a, b, reader, interns),
+            // Cells, Exceptions, Iterators, Modules, and async types compare by identity only (handled at Value level via HeapId comparison)
+            (Self::Cell(_), Self::Cell(_))
+            | (Self::Exception(_), Self::Exception(_))
+            | (Self::Iter(_), Self::Iter(_))
+            | (Self::Module(_), Self::Module(_))
+            | (Self::Coroutine(_), Self::Coroutine(_))
+            | (Self::GatherFuture(_), Self::GatherFuture(_)) => Ok(false),
+            _ => Ok(false), // Different types are never equal
+        }
+    }
+
     pub fn py_getitem(
         &self,
         key: &Value,
