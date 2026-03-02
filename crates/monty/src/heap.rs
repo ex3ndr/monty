@@ -11,6 +11,7 @@ use std::{
 };
 
 use ahash::AHashSet;
+use bytemuck::TransparentWrapper;
 use num_integer::Integer;
 use smallvec::SmallVec;
 
@@ -989,22 +990,6 @@ impl<'a, T> HeapRead<'a, T> {
         //    data while the return value of this function is alive.
         unsafe { self.value.as_ref() }
     }
-
-    /// Maps this value into some derived inner
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "FIXME, need to implement drop on `HeapRead`"
-    )]
-    pub fn map<'r, U>(
-        orig: Self,
-        reader: &'r HeapReader<'a, impl ContainsHeap>,
-        f: impl FnOnce(&'r T) -> &'r U,
-    ) -> HeapRead<'a, U> {
-        HeapRead {
-            value: NonNull::from(f(orig.get(reader))),
-            borrow: PhantomData,
-        }
-    }
 }
 
 pub struct HeapReadMut<'a, T> {
@@ -1034,6 +1019,12 @@ impl<'a, T> HeapReadMut<'a, T> {
         //    guaranteed by never exposing `&mut HeapData` outside of this module.
         //  - The borrow on `HeapReader` guarantees that there are no mutable borrows on any heap
         //    data while the return value of this function is alive.
+        //
+        // Note that this set of constraints means that `map()` methods are not possible for
+        // `HeapRead` and `HeapReadMut`; in particular it's not possible to guarantee that the
+        // address of the mapped value never changes; a write from another source could change
+        // the contents of `T` and invalidate mapped pointers. This `HeapRead` abstraction only
+        // works thanks to VERY tight control over the `HeapValue` contents.
         unsafe { self.value.as_ref() }
     }
 
@@ -1043,14 +1034,17 @@ impl<'a, T> HeapReadMut<'a, T> {
         unsafe { self.value.as_mut() }
     }
 
-    /// Maps this value into some derived inner
-    pub fn map<'r, U>(
-        mut orig: Self,
-        reader: &'r mut HeapReader<'a, impl ContainsHeap>,
-        f: impl FnOnce(&'r mut T) -> &'r mut U,
-    ) -> HeapReadMut<'a, U> {
+    /// Cast this reader around some type T which is a transparent wrapper around U
+    /// to its inner type. Name peel comes from `TransparentWrapper::peel` method.
+    pub fn peel<U>(self) -> HeapReadMut<'a, U>
+    where
+        T: TransparentWrapper<U>,
+    {
         HeapReadMut {
-            value: NonNull::from(f(orig.get_mut(reader))),
+            // NB this pointer casting is safe because `T` is a transparent wrapper around `U`,
+            // this means all the safety protections listed in `.get` about accessing `T` also
+            // apply to `U`.
+            value: NonNull::cast(self.value),
             borrow: PhantomData,
         }
     }

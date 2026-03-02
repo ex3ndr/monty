@@ -1,6 +1,7 @@
 use std::{cell::RefCell, fmt::Write, rc::Rc};
 
 use ahash::AHashSet;
+use bytemuck::TransparentWrapper;
 use hashbrown::HashTable;
 
 use super::{MontyIter, PyTrait};
@@ -537,7 +538,8 @@ impl SetStorage {
 /// When values are added, their reference counts are NOT incremented by the set -
 /// the caller transfers ownership. When values are removed or the set is cleared,
 /// their reference counts are decremented.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, TransparentWrapper)]
+#[repr(transparent)]
 pub(crate) struct Set(SetStorage);
 
 impl Set {
@@ -590,7 +592,7 @@ impl Set {
         reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         interns: &Interns,
     ) -> RunResult<bool> {
-        SetStorage::add_via_reader(HeapReadMut::map(this, reader, |s| &mut s.0), value, reader, interns)
+        SetStorage::add_via_reader(HeapReadMut::peel(this), value, reader, interns)
     }
 
     /// Removes an element from the set.
@@ -1052,7 +1054,8 @@ impl Set {
 /// # Hashability
 /// Unlike mutable sets, frozensets can be used as dict keys or set elements because
 /// they are immutable. The hash is computed as the XOR of element hashes (order-independent).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, TransparentWrapper)]
+#[repr(transparent)]
 pub(crate) struct FrozenSet(SetStorage);
 
 impl FrozenSet {
