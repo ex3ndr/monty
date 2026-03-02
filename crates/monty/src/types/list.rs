@@ -398,10 +398,10 @@ impl PyTrait for List {
         Ok(Some(Value::Ref(id)))
     }
 
-    fn py_iadd(
-        &mut self,
+    fn py_iadd<'a>(
+        this: &mut HeapRead<'a, Self>,
         other: Value,
-        heap: &mut Heap<impl ResourceTracker>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         self_id: Option<HeapId>,
         _interns: &Interns,
     ) -> Result<bool, crate::resource::ResourceError> {
@@ -410,40 +410,44 @@ impl PyTrait for List {
 
         if Some(*other_id) == self_id {
             // Self-extend: clone our own items with proper refcounting
-            let items = self
-                .items
+            let items: Vec<_> = this
+                .get(reader)
+                .as_slice()
                 .iter()
-                .map(|obj| obj.clone_with_heap(heap))
-                .collect::<Vec<_>>();
+                .map(|v| v.clone_with_heap(reader.heap))
+                .collect();
             // If we're self-extending and have refs, mark potential cycle
-            if self.contains_refs {
-                heap.mark_potential_cycle();
+            if this.get(reader).contains_refs {
+                reader.heap.mark_potential_cycle();
             }
-            self.items.extend(items);
+            this.get_mut(reader).items.extend(items);
         } else {
-            // Get items from other list using iadd_extend_from_heap helper
-            // This handles the borrow checker limitations with lifetime propagation
-            let prev_len = self.items.len();
-            if !heap.iadd_extend_list(*other_id, &mut self.items) {
+            let HeapData::List(list) = reader.heap.get(*other_id) else {
                 return Ok(false);
-            }
+            };
+
+            let items: Vec<Value> = list.as_slice().iter().map(|v| v.clone_with_heap(reader.heap)).collect();
+
             // Check if we added any refs and mark potential cycle
-            if self.contains_refs {
+            if this.get(reader).contains_refs {
                 // Already had refs, but adding more may create cycles
-                heap.mark_potential_cycle();
+                reader.heap.mark_potential_cycle();
             } else {
-                for item in &self.items[prev_len..] {
+                for item in &items {
                     if matches!(item, Value::Ref(_)) {
-                        self.contains_refs = true;
-                        heap.mark_potential_cycle();
+                        this.get_mut(reader).contains_refs = true;
+                        reader.heap.mark_potential_cycle();
                         break;
                     }
                 }
             }
+
+            let this = this.get_mut(reader);
+            this.items.extend(items);
         }
 
         // Drop the other value - we've extracted its contents and are done with the temporary reference
-        other.drop_with_heap(heap);
+        other.drop_with_heap(reader.heap);
         Ok(true)
     }
 
@@ -937,7 +941,6 @@ mod tests {
             create_heap_with_list_and_longint(vec![Value::Int(10), Value::Int(20), Value::Int(30)], BigInt::from(1));
         let interns = create_test_interns();
 
-        // Use heap.with_entry_mut to avoid double mutable borrow
         let key = Value::Ref(index_id);
         let new_value = Value::Int(99);
         heap.inc_ref(index_id);

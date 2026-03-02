@@ -13,7 +13,7 @@ use crate::{
     args::ArgValues,
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, RunResult},
-    heap::{DropWithHeap, Heap, HeapData, HeapGuard, HeapId, HeapRead, HeapReader},
+    heap::{DropWithHeap, Heap, HeapData, HeapGuard, HeapId, HeapRead, HeapReadOutput, HeapReader},
     intern::{Interns, StaticStrings, StringId},
     resource::{ResourceError, ResourceTracker},
     types::Type,
@@ -290,29 +290,31 @@ impl PyTrait for Str {
         Ok(Some(Value::Ref(id)))
     }
 
-    fn py_iadd(
-        &mut self,
+    fn py_iadd<'a>(
+        this: &mut HeapRead<'a, Self>,
         other: Value,
-        heap: &mut Heap<impl ResourceTracker>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         self_id: Option<HeapId>,
         interns: &Interns,
     ) -> Result<bool, crate::resource::ResourceError> {
         match &other {
             Value::Ref(other_id) => {
                 if Some(*other_id) == self_id {
-                    let rhs = self.0.clone();
-                    self.0.push_str(&rhs);
-                } else if let HeapData::Str(rhs) = heap.get(*other_id) {
-                    self.0.push_str(rhs.as_str());
+                    let this = this.get_mut(reader);
+                    let rhs = this.0.clone();
+                    this.0.push_str(&rhs);
+                } else if let HeapReadOutput::Str(rhs) = reader.read(*other_id) {
+                    let rhs = rhs.get(reader).0.clone();
+                    this.get_mut(reader).0.push_str(&rhs);
                 } else {
                     return Ok(false);
                 }
                 // Drop the other value - we've consumed it
-                other.drop_with_heap(heap);
+                other.drop_with_heap(reader.heap);
                 Ok(true)
             }
             Value::InternString(string_id) => {
-                self.0.push_str(interns.get_str(*string_id));
+                this.get_mut(reader).0.push_str(interns.get_str(*string_id));
                 Ok(true)
             }
             _ => Ok(false),

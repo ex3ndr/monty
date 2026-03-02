@@ -733,9 +733,9 @@ impl Value {
                     Ok(false)
                 }
             }
-            (Self::Ref(id), Self::Ref(_)) => {
-                heap.with_entry_mut(*id, |heap, mut data| data.py_iadd(other, heap, Some(*id), interns))
-            }
+            (Self::Ref(id), Self::Ref(_)) => HeapReader::with(heap, |reader| {
+                reader.read(*id).py_iadd(other, reader, Some(*id), interns)
+            }),
             _ => {
                 // Drop other if it's a Ref (ensure proper refcounting for unsupported type combinations)
                 other.drop_with_heap(heap);

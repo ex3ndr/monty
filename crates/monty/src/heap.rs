@@ -549,27 +549,6 @@ impl HeapData {
         }
     }
 
-    pub fn py_iadd(
-        &mut self,
-        other: Value,
-        heap: &mut Heap<impl ResourceTracker>,
-        self_id: Option<HeapId>,
-        interns: &Interns,
-    ) -> Result<bool, crate::resource::ResourceError> {
-        match self {
-            Self::Str(s) => s.py_iadd(other, heap, self_id, interns),
-            Self::Bytes(b) => b.py_iadd(other, heap, self_id, interns),
-            Self::List(l) => l.py_iadd(other, heap, self_id, interns),
-            Self::Tuple(t) => t.py_iadd(other, heap, self_id, interns),
-            Self::Dict(d) => d.py_iadd(other, heap, self_id, interns),
-            _ => {
-                // Drop other if it's a Ref (ensure proper refcounting for unsupported types)
-                other.drop_with_heap(heap);
-                Ok(false)
-            }
-        }
-    }
-
     pub fn py_call_attr(
         &mut self,
         heap: &mut Heap<impl ResourceTracker>,
@@ -1504,24 +1483,6 @@ impl<T: ResourceTracker> Heap<T> {
         match this.get_mut(id) {
             HeapDataMut::Cell(c) => std::mem::swap(&mut c.0, value),
             _ => panic!("Heap::set_cell_value: entry is not a Cell"),
-        }
-    }
-
-    /// Helper for List in-place add: extends the destination vec with items from a heap list.
-    ///
-    /// This method exists to work around borrow checker limitations when List::py_iadd
-    /// needs to read from one heap entry while extending another. By keeping both
-    /// the read and the refcount increments within Heap's impl block, we can use the
-    /// take/restore pattern to avoid the lifetime propagation issues.
-    ///
-    /// Returns `true` if successful, `false` if the source ID is not a List.
-    pub fn iadd_extend_list(&mut self, source_id: HeapId, dest: &mut Vec<Value>) -> bool {
-        if let HeapData::List(list) = self.get(source_id) {
-            let items: Vec<Value> = list.as_slice().iter().map(|v| v.clone_with_heap(self)).collect();
-            dest.extend(items);
-            true
-        } else {
-            false
         }
     }
 

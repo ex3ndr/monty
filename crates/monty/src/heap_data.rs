@@ -576,27 +576,6 @@ impl PyTrait for HeapDataMut<'_> {
         }
     }
 
-    fn py_iadd(
-        &mut self,
-        other: Value,
-        heap: &mut Heap<impl ResourceTracker>,
-        self_id: Option<HeapId>,
-        interns: &Interns,
-    ) -> Result<bool, crate::resource::ResourceError> {
-        match self {
-            Self::Str(s) => s.py_iadd(other, heap, self_id, interns),
-            Self::Bytes(b) => b.py_iadd(other, heap, self_id, interns),
-            Self::List(l) => l.py_iadd(other, heap, self_id, interns),
-            Self::Tuple(t) => t.py_iadd(other, heap, self_id, interns),
-            Self::Dict(d) => d.py_iadd(other, heap, self_id, interns),
-            _ => {
-                // Drop other if it's a Ref (ensure proper refcounting for unsupported types)
-                other.drop_with_heap(heap);
-                Ok(false)
-            }
-        }
-    }
-
     fn py_call_attr(
         &mut self,
         heap: &mut Heap<impl ResourceTracker>,
@@ -777,6 +756,27 @@ impl<'a> HeapReadOutput<'a> {
             HeapReadOutput::Module(_) => Type::Module,
             HeapReadOutput::Coroutine(_) | HeapReadOutput::GatherFuture(_) => Type::Coroutine,
             HeapReadOutput::Path(_) => Type::Path,
+        }
+    }
+
+    pub fn py_iadd(
+        &mut self,
+        other: Value,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
+        self_id: Option<HeapId>,
+        interns: &Interns,
+    ) -> Result<bool, crate::resource::ResourceError> {
+        match self {
+            Self::Str(s) => Str::py_iadd(s, other, reader, self_id, interns),
+            Self::Bytes(b) => Bytes::py_iadd(b, other, reader, self_id, interns),
+            Self::List(l) => List::py_iadd(l, other, reader, self_id, interns),
+            Self::Tuple(t) => Tuple::py_iadd(t, other, reader, self_id, interns),
+            Self::Dict(d) => Dict::py_iadd(d, other, reader, self_id, interns),
+            _ => {
+                // Drop other if it's a Ref (ensure proper refcounting for unsupported types)
+                other.drop_with_heap(reader.heap);
+                Ok(false)
+            }
         }
     }
 }

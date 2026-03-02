@@ -218,15 +218,14 @@ pub trait PyTrait {
     /// or `Err(ResourceError)` if allocation fails.
     ///
     /// The `interns` parameter provides access to interned string content for InternString/InternBytes.
-    fn py_iadd(
-        &mut self,
+    fn py_iadd<'a>(
+        _this: &mut HeapRead<'a, Self>,
         other: Value,
-        heap: &mut Heap<impl ResourceTracker>,
+        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         _self_id: Option<HeapId>,
         _interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        // Drop other if it's a Ref (ensure proper refcounting for unsupported types)
-        other.drop_with_heap(heap);
+        other.drop_with_heap(reader.heap);
         Ok(false)
     }
 
