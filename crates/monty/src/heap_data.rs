@@ -190,7 +190,7 @@ impl<'a> HeapReadOutput<'a> {
                 // Tuple is hashable only if all elements are hashable
                 let len = t.get(reader).as_slice().len();
                 for i in 0..len {
-                    let obj = t.get(reader).as_slice()[i].clone_with_heap(reader.heap);
+                    let obj = t.get(reader).as_slice()[i].clone_with_heap(reader);
                     defer_drop!(obj, reader);
                     match obj.py_hash(reader.heap, interns)? {
                         Some(h) => h.hash(&mut hasher),
@@ -207,7 +207,7 @@ impl<'a> HeapReadOutput<'a> {
                 // Hash only by elements (not type_name) to match equality semantics
                 let len = nt.get(reader).as_vec().len();
                 for i in 0..len {
-                    let obj = nt.get(reader).as_vec()[i].clone_with_heap(reader.heap);
+                    let obj = nt.get(reader).as_vec()[i].clone_with_heap(reader);
                     defer_drop!(obj, reader);
                     match obj.py_hash(reader.heap, interns)? {
                         Some(h) => h.hash(&mut hasher),
@@ -547,9 +547,9 @@ impl<'a> HeapReadOutput<'a> {
                 let token = reader.heap.incr_recursion_depth()?;
                 crate::defer_drop!(token, reader);
                 for i in 0..nt_len {
-                    let a = nt.get(reader).as_vec()[i].clone_with_heap(reader.heap);
+                    let a = nt.get(reader).as_vec()[i].clone_with_heap(reader);
                     crate::defer_drop!(a, reader);
-                    let b = t.get(reader).as_slice()[i].clone_with_heap(reader.heap);
+                    let b = t.get(reader).as_slice()[i].clone_with_heap(reader);
                     crate::defer_drop!(b, reader);
                     if !a.py_eq(b, reader.heap, interns)? {
                         return Ok(false);

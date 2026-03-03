@@ -268,7 +268,7 @@ impl PyTrait for List {
         // Return clone of the item with proper refcount increment
         // Safety: normalized_index is validated to be in [0, len) above
         let idx = usize::try_from(normalized_index).expect("list index validated non-negative");
-        Ok(this.get(reader).items[idx].clone_with_heap(reader.heap))
+        Ok(this.get(reader).items[idx].clone_with_heap(reader))
     }
 
     fn py_setitem<'a>(
@@ -345,9 +345,9 @@ impl PyTrait for List {
 
         for i in 0..this.get(reader).items.len() {
             reader.heap.check_time()?;
-            let i1 = this.get(reader).items[i].clone_with_heap(reader.heap);
+            let i1 = this.get(reader).items[i].clone_with_heap(reader);
             defer_drop!(i1, reader);
-            let i2 = other.get(reader).items[i].clone_with_heap(reader.heap);
+            let i2 = other.get(reader).items[i].clone_with_heap(reader);
             defer_drop!(i2, reader);
             if !i1.py_eq(i2, reader.heap, interns)? {
                 return Ok(false);
@@ -395,7 +395,7 @@ impl PyTrait for List {
             .items
             .iter()
             .chain(&other.get(reader).items)
-            .map(|obj| obj.clone_with_heap(reader.heap))
+            .map(|obj| obj.clone_with_heap(reader))
             .collect();
         let id = reader.heap.allocate(HeapData::List(Self::new(result)))?;
         Ok(Some(Value::Ref(id)))
@@ -417,7 +417,7 @@ impl PyTrait for List {
                 .get(reader)
                 .as_slice()
                 .iter()
-                .map(|v| v.clone_with_heap(reader.heap))
+                .map(|v| v.clone_with_heap(reader))
                 .collect();
             // If we're self-extending and have refs, mark potential cycle
             if this.get(reader).contains_refs {
@@ -429,7 +429,7 @@ impl PyTrait for List {
                 return Ok(false);
             };
 
-            let items: Vec<Value> = list.as_slice().iter().map(|v| v.clone_with_heap(reader.heap)).collect();
+            let items: Vec<Value> = list.as_slice().iter().map(|v| v.clone_with_heap(reader)).collect();
 
             // Check if we added any refs and mark potential cycle
             if this.get(reader).contains_refs {

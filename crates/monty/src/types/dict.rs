@@ -159,7 +159,7 @@ impl Dict {
         interns: &Interns,
     ) -> RunResult<Option<Value>> {
         if let Some(index) = Self::find_index_hash_via_reader(this, key, reader, interns)?.0 {
-            Ok(Some(this.get(reader).entries[index].value.clone_with_heap(reader.heap)))
+            Ok(Some(this.get(reader).entries[index].value.clone_with_heap(reader)))
         } else {
             Ok(None)
         }
@@ -479,7 +479,7 @@ impl Dict {
         // Dict keys are typically shallow (strings, ints, tuples of primitives),
         // so recursion errors are unlikely. If one occurs, treat it as "not equal".
         for idx in candidates {
-            let entry_key = this.get(reader).entries[idx].key.clone_with_heap(reader.heap);
+            let entry_key = this.get(reader).entries[idx].key.clone_with_heap(reader);
             defer_drop!(entry_key, reader);
             if key.py_eq(entry_key, reader.heap, interns).unwrap_or(false) {
                 return Ok((Some(idx), hash));
@@ -561,9 +561,9 @@ impl PyTrait for Dict {
         // Check that all keys in self exist in other with equal values
         for i in 0..this.get(reader).entries.len() {
             reader.heap.check_time()?;
-            let key = this.get(reader).entries[i].key.clone_with_heap(reader.heap);
+            let key = this.get(reader).entries[i].key.clone_with_heap(reader);
             defer_drop!(key, reader);
-            let value = this.get(reader).entries[i].value.clone_with_heap(reader.heap);
+            let value = this.get(reader).entries[i].value.clone_with_heap(reader);
             defer_drop!(value, reader);
             if let Ok(Some(other_v)) = Self::get_via_reader(other, key, reader, interns) {
                 defer_drop!(other_v, reader);

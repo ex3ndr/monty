@@ -179,7 +179,7 @@ impl PyTrait for NamedTuple {
 
         // Get by index with bounds checking
         match this.get(reader).get_by_index(index) {
-            Some(value) => Ok(value.clone_with_heap(reader.heap)),
+            Some(value) => Ok(value.clone_with_heap(reader)),
             None => Err(ExcType::tuple_index_error()),
         }
     }
@@ -198,9 +198,9 @@ impl PyTrait for NamedTuple {
         let token = reader.heap.incr_recursion_depth()?;
         defer_drop!(token, reader);
         for i in 0..this.get(reader).items.len() {
-            let i1 = this.get(reader).items[i].clone_with_heap(reader.heap);
+            let i1 = this.get(reader).items[i].clone_with_heap(reader);
             defer_drop!(i1, reader);
-            let i2 = other.get(reader).items[i].clone_with_heap(reader.heap);
+            let i2 = other.get(reader).items[i].clone_with_heap(reader);
             defer_drop!(i2, reader);
             if !i1.py_eq(i2, reader.heap, interns)? {
                 return Ok(false);
@@ -270,7 +270,7 @@ impl PyTrait for NamedTuple {
     ) -> RunResult<Option<AttrCallResult>> {
         let attr_name = attr.as_str(interns);
         if let Some(value) = this.get(reader).get_by_name(attr_name, interns) {
-            Ok(Some(AttrCallResult::Value(value.clone_with_heap(reader.heap))))
+            Ok(Some(AttrCallResult::Value(value.clone_with_heap(reader))))
         } else {
             // we use name here, not `self.py_type(heap)` hence returning a Ok(None)
             Err(ExcType::attribute_error(this.get(reader).name(interns), attr_name))

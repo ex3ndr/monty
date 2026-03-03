@@ -182,7 +182,7 @@ impl Dataclass {
             let Some(value) = attrs
                 .get(reader)
                 .get_by_str(field_name, reader.heap, interns)
-                .map(|v| v.clone_with_heap(reader.heap))
+                .map(|v| v.clone_with_heap(reader))
             else {
                 continue; // Missing field value - TODO should this be an error?
             };
@@ -356,7 +356,7 @@ impl PyTrait for Dataclass {
         let attr_name = attr.as_str(interns);
         let attrs = Self::attrs_reader(this, reader);
         match attrs.get(reader).get_by_str(attr_name, reader.heap, interns) {
-            Some(value) => Ok(Some(AttrCallResult::Value(value.clone_with_heap(reader.heap)))),
+            Some(value) => Ok(Some(AttrCallResult::Value(value.clone_with_heap(reader)))),
             // we use name here, not `self.py_type(heap)` hence returning a Ok(None)
             None => Err(ExcType::attribute_error(this.get(reader).name(interns), attr_name)),
         }

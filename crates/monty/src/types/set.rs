@@ -353,7 +353,7 @@ impl SetStorage {
         // Set values are typically shallow (strings, ints, tuples of primitives),
         // so recursion errors are unlikely. If one occurs, treat it as "not equal".
         for idx in candidates {
-            let item = this.get(reader).entries[idx].value.clone_with_heap(reader.heap);
+            let item = this.get(reader).entries[idx].value.clone_with_heap(reader);
             defer_drop!(item, reader);
             if value.py_eq(item, reader.heap, interns)? {
                 return Ok(true);
@@ -401,7 +401,7 @@ impl SetStorage {
         // Check that every element in self is in other
         let entry_count = this.get(reader).entries.len();
         for i in 0..entry_count {
-            let entry = this.get(reader).entries[i].value.clone_with_heap(reader.heap);
+            let entry = this.get(reader).entries[i].value.clone_with_heap(reader);
             defer_drop!(entry, reader);
             if !matches!(Self::contains_via_reader(other, entry, reader, interns), Ok(true)) {
                 return Ok(false);
@@ -1136,7 +1136,7 @@ impl FrozenSet {
         let mut hash: u64 = 0;
         let len = this.get(reader).0.entries.len();
         for i in 0..len {
-            let entry = this.get(reader).0.entries[i].value.clone_with_heap(reader.heap);
+            let entry = this.get(reader).0.entries[i].value.clone_with_heap(reader);
             defer_drop!(entry, reader);
             match entry.py_hash(reader.heap, interns)? {
                 Some(h) => hash ^= h,

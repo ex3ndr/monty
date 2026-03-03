@@ -1586,7 +1586,7 @@ impl Value {
                     HeapReadOutput::List(list) => {
                         let len = list.get(reader).len();
                         for i in 0..len {
-                            let el = list.get(reader).as_slice()[i].clone_with_heap(reader.heap);
+                            let el = list.get(reader).as_slice()[i].clone_with_heap(reader);
                             defer_drop!(el, reader);
                             if item.py_eq(el, reader.heap, interns)? {
                                 return Ok(true);
@@ -1597,7 +1597,7 @@ impl Value {
                     HeapReadOutput::Tuple(tuple) => {
                         let len = tuple.get(reader).as_slice().len();
                         for i in 0..len {
-                            let el = tuple.get(reader).as_slice()[i].clone_with_heap(reader.heap);
+                            let el = tuple.get(reader).as_slice()[i].clone_with_heap(reader);
                             defer_drop!(el, reader);
                             if item.py_eq(el, reader.heap, interns)? {
                                 return Ok(true);

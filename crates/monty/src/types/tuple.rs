@@ -201,7 +201,7 @@ impl PyTrait for Tuple {
         // Return clone of the item with proper refcount increment
         // Safety: normalized_index is validated to be in [0, len) above
         let idx = usize::try_from(normalized_index).expect("tuple index validated non-negative");
-        Ok(this.get(reader).items[idx].clone_with_heap(reader.heap))
+        Ok(this.get(reader).items[idx].clone_with_heap(reader))
     }
 
     fn py_eq<'a>(
@@ -218,9 +218,9 @@ impl PyTrait for Tuple {
 
         for i in 0..this.get(reader).items.len() {
             reader.heap.check_time()?;
-            let i1 = this.get(reader).items[i].clone_with_heap(reader.heap);
+            let i1 = this.get(reader).items[i].clone_with_heap(reader);
             defer_drop!(i1, reader);
-            let i2 = other.get(reader).items[i].clone_with_heap(reader.heap);
+            let i2 = other.get(reader).items[i].clone_with_heap(reader);
             defer_drop!(i2, reader);
             if !i1.py_eq(i2, reader.heap, interns)? {
                 return Ok(false);
@@ -240,7 +240,7 @@ impl PyTrait for Tuple {
             .items
             .iter()
             .chain(&other.get(reader).items)
-            .map(|obj| obj.clone_with_heap(reader.heap))
+            .map(|obj| obj.clone_with_heap(reader))
             .collect();
         Ok(Some(allocate_tuple(result, reader.heap)?))
     }

@@ -2088,7 +2088,7 @@ mod heap_reader_tests {
                 .as_slice()
                 .iter()
                 .chain(src.get(reader).as_slice())
-                .map(|v| v.clone_with_heap(reader.heap))
+                .map(|v| v.clone_with_heap(reader))
                 .collect();
 
             *dest.get_mut(reader).as_vec_mut() = combined;
