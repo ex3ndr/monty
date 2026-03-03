@@ -6,7 +6,7 @@
 
 use ::monty::{ExternalResult, MontyObject};
 use pyo3::{
-    exceptions::PyKeyError,
+    exceptions::{PyLookupError, PyRuntimeError},
     prelude::*,
     types::{PyDict, PyTuple},
 };
@@ -50,7 +50,7 @@ fn dispatch_method_call_inner(
     let mut args_iter = args.iter();
     let self_obj = args_iter
         .next()
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Method call missing self argument"))?;
+        .ok_or_else(|| PyRuntimeError::new_err("Method call missing self argument"))?;
     let py_self = monty_to_py(py, self_obj, dc_registry)?;
 
     // Get the method from the object
@@ -131,10 +131,9 @@ impl<'a, 'py> ExternalFunctionRegistry<'a, 'py> {
         kwargs: &[(MontyObject, MontyObject)],
     ) -> PyResult<MontyObject> {
         // Look up the callable
-        let callable = self
-            .functions
-            .get_item(function_name)?
-            .ok_or_else(|| PyKeyError::new_err(format!("External function '{function_name}' not found")))?;
+        let callable = self.functions.get_item(function_name)?.ok_or_else(|| {
+            PyLookupError::new_err(format!("Unable to find '{function_name}' in external functions dict"))
+        })?;
 
         // Convert positional arguments to Python objects
         let py_args: PyResult<Vec<Py<PyAny>>> = args

@@ -2,10 +2,10 @@
 
 use crate::{
     args::ArgValues,
+    bytecode::VM,
     defer_drop,
     exception_private::{ExcType, RunResult, SimpleException},
-    heap::{Heap, HeapData},
-    intern::Interns,
+    heap::HeapData,
     resource::ResourceTracker,
     value::Value,
 };
@@ -13,13 +13,13 @@ use crate::{
 /// Implementation of the ord() builtin function.
 ///
 /// Returns the Unicode code point of a one-character string.
-pub fn builtin_ord(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, interns: &Interns) -> RunResult<Value> {
-    let value = args.get_one_arg("ord", heap)?;
-    defer_drop!(value, heap);
+pub fn builtin_ord(vm: &mut VM<impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    let value = args.get_one_arg("ord", vm.heap)?;
+    defer_drop!(value, vm);
 
     match value {
         Value::InternString(string_id) => {
-            let s = interns.get_str(*string_id);
+            let s = vm.interns.get_str(*string_id);
             let mut chars = s.chars();
             if let (Some(c), None) = (chars.next(), chars.next()) {
                 Ok(Value::Int(c as i64))
@@ -33,7 +33,7 @@ pub fn builtin_ord(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
             }
         }
         Value::Ref(id) => {
-            if let HeapData::Str(s) = heap.get(*id) {
+            if let HeapData::Str(s) = vm.heap.get(*id) {
                 let mut chars = s.as_str().chars();
                 if let (Some(c), None) = (chars.next(), chars.next()) {
                     Ok(Value::Int(c as i64))
@@ -46,7 +46,7 @@ pub fn builtin_ord(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
                     .into())
                 }
             } else {
-                let type_name = value.py_type(heap);
+                let type_name = value.py_type(vm.heap);
                 Err(SimpleException::new_msg(
                     ExcType::TypeError,
                     format!("ord() expected string of length 1, but {type_name} found"),
@@ -55,7 +55,7 @@ pub fn builtin_ord(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
             }
         }
         _ => {
-            let type_name = value.py_type(heap);
+            let type_name = value.py_type(vm.heap);
             Err(SimpleException::new_msg(
                 ExcType::TypeError,
                 format!("ord() expected string of length 1, but {type_name} found"),
