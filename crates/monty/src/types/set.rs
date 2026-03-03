@@ -11,7 +11,7 @@ use crate::{
     bytecode::VM,
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, RunResult},
-    heap::{DropWithHeap, Heap, HeapData, HeapId, HeapRead, HeapReader},
+    heap::{ContainsHeap, DropWithHeap, Heap, HeapData, HeapId, HeapRead, HeapReader},
     intern::{Interns, StaticStrings},
     resource::{ResourceError, ResourceTracker},
     types::Type,
@@ -256,7 +256,7 @@ impl SetStorage {
     }
 
     /// Creates a deep clone with proper reference counting.
-    fn clone_with_heap(&self, heap: &Heap<impl ResourceTracker>) -> Self {
+    fn clone_with_heap(&self, heap: &impl ContainsHeap) -> Self {
         Self {
             indices: self.indices.clone(),
             entries: self

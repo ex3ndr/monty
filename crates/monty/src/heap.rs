@@ -640,6 +640,9 @@ impl<'a, H: ContainsHeap> HeapReader<'a, H> {
 impl<H: ContainsHeap> ContainsHeap for HeapReader<'_, H> {
     type ResourceTracker = H::ResourceTracker;
 
+    fn heap(&self) -> &Heap<Self::ResourceTracker> {
+        self.heap.heap()
+    }
     fn heap_mut(&mut self) -> &mut Heap<Self::ResourceTracker> {
         self.heap.heap_mut()
     }
@@ -799,7 +802,7 @@ pub(crate) struct RecursionToken(());
 
 impl DropWithHeap for RecursionToken {
     #[inline]
-    fn drop_with_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
+    fn drop_with_concrete_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
         heap.decr_recursion_depth();
     }
 }
@@ -1691,11 +1694,15 @@ impl<T: ResourceTracker> Drop for Heap<T> {
 /// to participate in the `HeapGuard` pattern.
 pub(crate) trait ContainsHeap {
     type ResourceTracker: ResourceTracker;
+    fn heap(&self) -> &Heap<Self::ResourceTracker>;
     fn heap_mut(&mut self) -> &mut Heap<Self::ResourceTracker>;
 }
 
 impl<T: ResourceTracker> ContainsHeap for Heap<T> {
     type ResourceTracker = T;
+    fn heap(&self) -> &Self {
+        self
+    }
     #[inline]
     fn heap_mut(&mut self) -> &mut Self {
         self
@@ -1716,21 +1723,26 @@ impl<T: ResourceTracker> ContainsHeap for Heap<T> {
 ///
 /// Implemented for `Value`, `Option<V>`, `Vec<Value>`, `ArgValues`, iterators, and other
 /// types that hold heap references.
-pub(crate) trait DropWithHeap {
+pub(crate) trait DropWithHeap: Sized {
     /// Consume `self` and decrement reference counts for any heap-allocated values contained within.
-    fn drop_with_heap<T: ResourceTracker>(self, heap: &mut Heap<T>);
+    fn drop_with_heap<H: ContainsHeap>(self, heap: &mut H) {
+        self.drop_with_concrete_heap(heap.heap_mut());
+    }
+
+    /// Consume `self` and decrement reference counts for any heap-allocated values contained within.
+    fn drop_with_concrete_heap<T: ResourceTracker>(self, heap: &mut Heap<T>);
 }
 
 impl DropWithHeap for Value {
     #[inline]
-    fn drop_with_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
+    fn drop_with_concrete_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
         Self::drop_with_heap(self, heap);
     }
 }
 
 impl<U: DropWithHeap> DropWithHeap for Option<U> {
     #[inline]
-    fn drop_with_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
+    fn drop_with_concrete_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
         if let Some(value) = self {
             value.drop_with_heap(heap);
         }
@@ -1738,7 +1750,7 @@ impl<U: DropWithHeap> DropWithHeap for Option<U> {
 }
 
 impl<U: DropWithHeap> DropWithHeap for Vec<U> {
-    fn drop_with_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
+    fn drop_with_concrete_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
         for value in self {
             value.drop_with_heap(heap);
         }
@@ -1746,7 +1758,7 @@ impl<U: DropWithHeap> DropWithHeap for Vec<U> {
 }
 
 impl<U: DropWithHeap> DropWithHeap for vec::IntoIter<U> {
-    fn drop_with_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
+    fn drop_with_concrete_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
         for value in self {
             value.drop_with_heap(heap);
         }
@@ -1754,7 +1766,7 @@ impl<U: DropWithHeap> DropWithHeap for vec::IntoIter<U> {
 }
 
 impl<const N: usize> DropWithHeap for [Value; N] {
-    fn drop_with_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
+    fn drop_with_concrete_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
         for value in self {
             value.drop_with_heap(heap);
         }
@@ -1762,7 +1774,7 @@ impl<const N: usize> DropWithHeap for [Value; N] {
 }
 
 impl<U: DropWithHeap, V: DropWithHeap> DropWithHeap for (U, V) {
-    fn drop_with_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
+    fn drop_with_concrete_heap<T: ResourceTracker>(self, heap: &mut Heap<T>) {
         let (left, right) = self;
         left.drop_with_heap(heap);
         right.drop_with_heap(heap);
