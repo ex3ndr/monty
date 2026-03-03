@@ -703,7 +703,7 @@ impl<'a> HeapReadOutput<'a> {
 
     pub fn py_iadd(
         &mut self,
-        other: Value,
+        other: &Value,
         reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         self_id: Option<HeapId>,
         interns: &Interns,
@@ -714,11 +714,7 @@ impl<'a> HeapReadOutput<'a> {
             Self::List(l) => List::py_iadd(l, other, reader, self_id, interns),
             Self::Tuple(t) => Tuple::py_iadd(t, other, reader, self_id, interns),
             Self::Dict(d) => Dict::py_iadd(d, other, reader, self_id, interns),
-            _ => {
-                // Drop other if it's a Ref (ensure proper refcounting for unsupported types)
-                other.drop_with_heap(reader);
-                Ok(false)
-            }
+            _ => Ok(false),
         }
     }
 

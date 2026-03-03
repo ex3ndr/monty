@@ -212,12 +212,11 @@ pub trait PyTrait {
     /// The `interns` parameter provides access to interned string content for InternString/InternBytes.
     fn py_iadd<'a>(
         _this: &mut HeapRead<'a, Self>,
-        other: Value,
-        reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
+        _other: &Value,
+        _reader: &mut HeapReader<'a, Heap<impl ResourceTracker>>,
         _self_id: Option<HeapId>,
         _interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        other.drop_with_heap(reader);
         Ok(false)
     }
 
