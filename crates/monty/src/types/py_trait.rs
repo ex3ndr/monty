@@ -247,7 +247,7 @@ pub trait PyTrait {
     fn py_call_attr(
         &mut self,
         _self_id: HeapId,
-        vm: &mut VM<impl ResourceTracker>,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
         attr: &EitherStr,
         _args: ArgValues,
     ) -> RunResult<AttrCallResult> {
