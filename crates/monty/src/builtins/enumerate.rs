@@ -8,7 +8,6 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, RunResult, SimpleException},
     heap::HeapData,
-    resource::ResourceTracker,
     types::{List, MontyIter, PyTrait, allocate_tuple},
     value::Value,
 };
@@ -17,7 +16,7 @@ use crate::{
 ///
 /// Returns a list of (index, value) tuples.
 /// Note: In Python this returns an iterator, but we return a list for simplicity.
-pub fn builtin_enumerate(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_enumerate(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (iterable, start) = args.get_one_two_args("enumerate", vm.heap)?;
     let iter = MontyIter::new(iterable, vm)?;
     defer_drop_mut!(iter, vm);

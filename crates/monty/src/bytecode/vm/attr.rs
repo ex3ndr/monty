@@ -6,11 +6,10 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, RunError},
     intern::StringId,
-    resource::ResourceTracker,
     value::EitherStr,
 };
 
-impl<T: ResourceTracker> VM<'_, '_, T> {
+impl VM<'_, '_> {
     /// Loads an attribute from an object and pushes it onto the stack.
     ///
     /// Returns an AttributeError if the attribute doesn't exist.

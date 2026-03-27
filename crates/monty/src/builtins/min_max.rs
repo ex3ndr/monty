@@ -9,7 +9,6 @@ use crate::{
     exception_private::{ExcType, RunError, RunResult, SimpleException},
     heap::HeapGuard,
     heap_traits::DropWithHeap,
-    resource::ResourceTracker,
     types::{MontyIter, PyTrait},
     value::Value,
 };
@@ -20,7 +19,7 @@ use crate::{
 /// Supports two forms:
 /// - `min(iterable)` - returns smallest item from iterable
 /// - `min(arg1, arg2, ...)` - returns smallest of the arguments
-pub fn builtin_min(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_min(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     builtin_min_max(vm, args, true)
 }
 
@@ -30,14 +29,14 @@ pub fn builtin_min(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -
 /// Supports two forms:
 /// - `max(iterable)` - returns largest item from iterable
 /// - `max(arg1, arg2, ...)` - returns largest of the arguments
-pub fn builtin_max(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_max(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     builtin_min_max(vm, args, false)
 }
 
 /// Shared implementation for min() and max().
 ///
 /// When `is_min` is true, returns the minimum; otherwise returns the maximum.
-fn builtin_min_max(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues, is_min: bool) -> RunResult<Value> {
+fn builtin_min_max(vm: &mut VM<'_, '_>, args: ArgValues, is_min: bool) -> RunResult<Value> {
     let func_name = if is_min { "min" } else { "max" };
     let key_context = if is_min {
         "min() key argument"
@@ -175,7 +174,7 @@ fn builtin_min_max(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues, i
 fn parse_min_max_kwargs(
     kwargs: KwargsValues,
     func_name: &str,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
+    vm: &mut VM<'_, '_>,
 ) -> RunResult<(Option<Value>, Option<Value>)> {
     let (key_fn, default_value) = kwargs.parse_named_kwargs_pair(
         func_name,
@@ -202,12 +201,7 @@ fn parse_min_max_kwargs(
 /// The caller passes an owned clone of the candidate so this helper can forward it
 /// into the function call without changing ownership of the original item being
 /// tracked as the eventual min/max result.
-fn evaluate_key(
-    item: Value,
-    key_fn: &Value,
-    key_context: &'static str,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
-) -> RunResult<Value> {
+fn evaluate_key(item: Value, key_fn: &Value, key_context: &'static str, vm: &mut VM<'_, '_>) -> RunResult<Value> {
     vm.evaluate_function(key_context, key_fn, ArgValues::One(item))
 }
 
@@ -216,12 +210,7 @@ fn evaluate_key(
 /// `min()` replaces the current winner when the new candidate compares smaller,
 /// while `max()` replaces it when the new candidate compares larger. Equal values
 /// keep the existing winner so ties preserve the first-seen item, matching CPython.
-fn candidate_wins(
-    current: &Value,
-    candidate: &Value,
-    is_min: bool,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
-) -> RunResult<bool> {
+fn candidate_wins(current: &Value, candidate: &Value, is_min: bool, vm: &mut VM<'_, '_>) -> RunResult<bool> {
     let Some(ordering) = candidate.py_cmp(current, vm)? else {
         return Err(ord_not_supported(candidate, current, is_min, vm));
     };
@@ -240,7 +229,7 @@ fn default_with_multiple_args(func_name: &str) -> RunError {
 }
 
 #[cold]
-fn ord_not_supported(left: &Value, right: &Value, is_min: bool, vm: &VM<'_, '_, impl ResourceTracker>) -> RunError {
+fn ord_not_supported(left: &Value, right: &Value, is_min: bool, vm: &VM<'_, '_>) -> RunError {
     let left_type = left.py_type(vm);
     let right_type = right.py_type(vm);
     let operator = if is_min { '<' } else { '>' };

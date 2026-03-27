@@ -16,9 +16,9 @@ use monty::{MontyObject, MontyRun, NameLookupResult, NoLimitTracker, PrintWriter
 /// Helper: drives execution through consecutive `NameLookup` yields,
 /// resolving each by calling `resolver(name)`.
 fn resolve_lookups_with(
-    mut progress: RunProgress<NoLimitTracker>,
+    mut progress: RunProgress,
     resolver: impl Fn(&str) -> NameLookupResult,
-) -> Result<RunProgress<NoLimitTracker>, monty::MontyException> {
+) -> Result<RunProgress, monty::MontyException> {
     while let RunProgress::NameLookup(lookup) = progress {
         let result = resolver(&lookup.name);
         progress = lookup.resume(result, PrintWriter::Stdout)?;
@@ -28,9 +28,7 @@ fn resolve_lookups_with(
 
 /// Helper: resolves all `NameLookup` yields as `Function` objects (the common case
 /// for external function calls).
-fn resolve_as_functions(
-    progress: RunProgress<NoLimitTracker>,
-) -> Result<RunProgress<NoLimitTracker>, monty::MontyException> {
+fn resolve_as_functions(progress: RunProgress) -> Result<RunProgress, monty::MontyException> {
     resolve_lookups_with(progress, |name| {
         NameLookupResult::Value(MontyObject::Function {
             name: name.to_string(),

@@ -16,7 +16,7 @@ use crate::{
         heap_read_ref_as_field_mut,
     },
     intern::Interns,
-    resource::{ResourceError, ResourceTracker},
+    resource::ResourceError,
     types::Type,
     value::{EitherStr, Value},
 };
@@ -132,12 +132,7 @@ impl<'h> HeapRead<'h, Dataclass> {
     /// is a new attribute.
     ///
     /// Returns `FrozenInstanceError` if the dataclass is frozen.
-    pub fn set_attr(
-        &mut self,
-        name: Value,
-        value: Value,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
-    ) -> RunResult<Option<Value>> {
+    pub fn set_attr(&mut self, name: Value, value: Value, vm: &mut VM<'h, '_>) -> RunResult<Option<Value>> {
         if self.get(vm.heap).frozen {
             // Get attribute name for error message
             let attr_name = match &name {
@@ -157,7 +152,7 @@ impl<'h> HeapRead<'h, Dataclass> {
     /// Returns `Ok(Some(hash))` for frozen (immutable) dataclasses, `Ok(None)` for mutable ones.
     /// Returns `Err(ResourceError::Recursion)` if the recursion limit is exceeded.
     /// The hash is computed from the class name and declared field values only.
-    pub fn compute_hash(&self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> Result<Option<u64>, ResourceError> {
+    pub fn compute_hash(&self, vm: &mut VM<'h, '_>) -> Result<Option<u64>, ResourceError> {
         // Only frozen (immutable) dataclasses are hashable
         if !self.get(vm.heap).frozen {
             return Ok(None);
@@ -194,31 +189,26 @@ impl<'h> HeapRead<'h, Dataclass> {
 }
 
 impl<'h> PyTrait<'h> for HeapRead<'h, Dataclass> {
-    fn py_type(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Type {
+    fn py_type(&self, _vm: &VM<'h, '_>) -> Type {
         Type::Dataclass
     }
 
-    fn py_len(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Option<usize> {
+    fn py_len(&self, _vm: &VM<'h, '_>) -> Option<usize> {
         // Dataclasses don't have a length
         None
     }
 
-    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_>) -> Result<bool, ResourceError> {
         // Dataclasses are equal if they have the same name and equal attrs
         Ok(self.get(vm.heap).name == other.get(vm.heap).name && self.attrs().py_eq(&other.attrs(), vm)?)
     }
 
-    fn py_bool(&self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> bool {
+    fn py_bool(&self, _vm: &mut VM<'h, '_>) -> bool {
         // Dataclass instances are always truthy (like Python objects)
         true
     }
 
-    fn py_repr_fmt(
-        &self,
-        f: &mut impl Write,
-        vm: &VM<'h, '_, impl ResourceTracker>,
-        heap_ids: &mut AHashSet<HeapId>,
-    ) -> RunResult<()> {
+    fn py_repr_fmt(&self, f: &mut impl Write, vm: &VM<'h, '_>, heap_ids: &mut AHashSet<HeapId>) -> RunResult<()> {
         // Check depth limit before recursing
         let heap = &*vm.heap;
         let Some(token) = heap.incr_recursion_depth_for_repr() else {
@@ -266,7 +256,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Dataclass> {
     fn py_call_attr(
         &mut self,
         self_id: HeapId,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
+        vm: &mut VM<'h, '_>,
         attr: &EitherStr,
         args: ArgValues,
     ) -> RunResult<CallResult> {
@@ -304,7 +294,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Dataclass> {
         }
     }
 
-    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<CallResult>> {
+    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, '_>) -> RunResult<Option<CallResult>> {
         let attr_name = attr.as_str(vm.interns);
         match self.get(vm.heap).attrs.get_by_str(attr_name, vm.heap, vm.interns) {
             Some(value) => Ok(Some(CallResult::Value(value.clone_with_heap(vm.heap)))),

@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use monty::{DEFAULT_MAX_RECURSION_DEPTH, ResourceError, ResourceTracker};
+use monty::{DEFAULT_MAX_RECURSION_DEPTH, ResourceError, ResourceTracker, TrackerState};
 use pyo3::{prelude::*, types::PyDict};
 
 use crate::exceptions::exc_py_to_monty;
@@ -82,7 +82,7 @@ const SIGNAL_CHECK_INTERVAL: u16 = 1000;
 /// This allows Ctrl+C and other Python signals to interrupt long-running code
 /// executed through the monty interpreter. Signals are checked every
 /// `SIGNAL_CHECK_INTERVAL` calls to `check_time` (at statement boundaries).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug)]
 pub struct PySignalTracker<T: ResourceTracker> {
     inner: T,
     /// Counter for check_time calls, used to rate-limit signal checks.
@@ -116,12 +116,12 @@ impl<T: ResourceTracker> PySignalTracker<T> {
 }
 
 impl<T: ResourceTracker> ResourceTracker for PySignalTracker<T> {
-    fn on_allocate(&self, get_size: impl FnOnce() -> usize) -> Result<(), ResourceError> {
-        self.inner.on_allocate(get_size)
+    fn on_allocate(&self, size: usize) -> Result<(), ResourceError> {
+        self.inner.on_allocate(size)
     }
 
-    fn on_free(&self, get_size: impl FnOnce() -> usize) {
-        self.inner.on_free(get_size);
+    fn on_free(&self, size: usize) {
+        self.inner.on_free(size);
     }
 
     fn check_time(&self) -> Result<(), ResourceError> {
@@ -142,5 +142,13 @@ impl<T: ResourceTracker> ResourceTracker for PySignalTracker<T> {
 
     fn on_grow(&self, additional_bytes: usize) -> Result<(), ResourceError> {
         self.inner.on_grow(additional_bytes)
+    }
+
+    fn set_max_duration(&mut self, duration: std::time::Duration) {
+        self.inner.set_max_duration(duration);
+    }
+
+    fn tracker_state(&self) -> TrackerState {
+        self.inner.tracker_state()
     }
 }

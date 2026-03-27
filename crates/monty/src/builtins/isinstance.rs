@@ -7,7 +7,6 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, RunResult},
     heap::{Heap, HeapData},
-    resource::ResourceTracker,
     types::{PyTrait, Type},
     value::Value,
 };
@@ -15,7 +14,7 @@ use crate::{
 /// Implementation of the isinstance() builtin function.
 ///
 /// Checks if an object is an instance of a class or a tuple of classes.
-pub fn builtin_isinstance(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_isinstance(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (obj, classinfo) = args.get_two_args("isinstance", vm.heap)?;
     defer_drop!(obj, vm);
     defer_drop!(classinfo, vm);
@@ -38,7 +37,7 @@ pub fn builtin_isinstance(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgVa
 /// - Exception types: `isinstance(err, ValueError)`
 /// - Exception hierarchy: `isinstance(err, LookupError)` for KeyError/IndexError
 /// - Nested tuples: `isinstance(x, (int, (str, bytes)))`
-fn isinstance_check(obj_type: Type, classinfo: &Value, heap: &Heap<impl ResourceTracker>) -> Result<bool, ()> {
+fn isinstance_check(obj_type: Type, classinfo: &Value, heap: &Heap) -> Result<bool, ()> {
     match classinfo {
         // Single type: isinstance(x, int)
         Value::Builtin(Builtins::Type(t)) => Ok(obj_type.is_instance_of(*t)),

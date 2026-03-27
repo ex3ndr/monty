@@ -11,7 +11,7 @@ use crate::{
     bytecode::VM,
     heap::{HeapData, HeapId},
     intern::StaticStrings,
-    resource::{ResourceError, ResourceTracker},
+    resource::ResourceError,
     types::{Module, Type},
     value::Value,
 };
@@ -23,7 +23,7 @@ use crate::{
 /// # Panics
 ///
 /// Panics if the required strings have not been pre-interned during prepare phase.
-pub fn create_module(vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<HeapId, ResourceError> {
+pub fn create_module(vm: &mut VM<'_, '_>) -> Result<HeapId, ResourceError> {
     let mut module = Module::new(StaticStrings::Pathlib);
 
     // pathlib.Path - the Path class (callable to create Path instances)

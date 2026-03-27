@@ -14,7 +14,7 @@ use crate::{
     bytecode::VM,
     exception_private::{ExcType, RunError, SimpleException},
     heap::{HeapData, HeapId},
-    resource::{ResourceError, ResourceTracker},
+    resource::ResourceError,
     types::{
         LongInt, NamedTuple, Path, PyTrait, Type, allocate_tuple,
         bytes::{Bytes, bytes_repr},
@@ -187,7 +187,7 @@ impl MontyObject {
     /// then properly drops the Value via `drop_with_heap` to maintain reference counting.
     ///
     /// The `interns` parameter is used to look up interned string/bytes content.
-    pub(crate) fn new(value: Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Self {
+    pub(crate) fn new(value: Value, vm: &mut VM<'_, '_>) -> Self {
         let py_obj = Self::from_value(&value, vm);
         value.drop_with_heap(vm);
         py_obj
@@ -207,7 +207,7 @@ impl MontyObject {
     /// # Errors
     /// Returns `InvalidInputError` if called on the `Repr` variant,
     /// as it is only valid as an output from code execution, not as an input.
-    pub(crate) fn to_value(self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<Value, InvalidInputError> {
+    pub(crate) fn to_value(self, vm: &mut VM<'_, '_>) -> Result<Value, InvalidInputError> {
         match self {
             Self::Ellipsis => Ok(Value::Ellipsis),
             Self::None => Ok(Value::None),
@@ -314,7 +314,7 @@ impl MontyObject {
         }
     }
 
-    fn from_value(object: &Value, vm: &VM<'_, '_, impl ResourceTracker>) -> Self {
+    fn from_value(object: &Value, vm: &VM<'_, '_>) -> Self {
         let mut visited = AHashSet::new();
         Self::from_value_inner(object, vm, &mut visited)
     }
@@ -326,7 +326,7 @@ impl MontyObject {
     /// with an appropriate placeholder string.
     ///
     /// Recursion depth is tracked via `heap.incr_recursion_depth_for_repr()`.
-    fn from_value_inner(object: &Value, vm: &VM<'_, '_, impl ResourceTracker>, visited: &mut AHashSet<HeapId>) -> Self {
+    fn from_value_inner(object: &Value, vm: &VM<'_, '_>, visited: &mut AHashSet<HeapId>) -> Self {
         // Check depth limit before processing
         let Some(token) = vm.heap.incr_recursion_depth_for_repr() else {
             return Self::Repr("<deeply nested>".to_owned());
@@ -487,7 +487,7 @@ impl MontyObject {
 
 /// Converts a value to its repr string for `MontyObject`, falling back to a
 /// descriptive error message if `py_repr` fails (e.g. INT_MAX_STR_DIGITS).
-fn repr_or_error(value: &Value, vm: &VM<'_, '_, impl ResourceTracker>) -> MontyObject {
+fn repr_or_error(value: &Value, vm: &VM<'_, '_>) -> MontyObject {
     match value.py_repr(vm) {
         Ok(s) => MontyObject::Repr(s.into_owned()),
         Err(e) => {

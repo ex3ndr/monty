@@ -357,7 +357,7 @@ fn run_repl(file_path: &str, code: &str, tracker: impl ResourceTracker) -> ExitC
 }
 
 /// Executes one collected REPL snippet, printing the result or error.
-fn execute_repl_snippet(repl: &mut MontyRepl<impl ResourceTracker>, snippet: &str) {
+fn execute_repl_snippet(repl: &mut MontyRepl, snippet: &str) {
     match repl.feed_run(snippet, vec![], PrintWriter::Stdout) {
         Ok(output) => {
             if output != MontyObject::None {
@@ -378,7 +378,7 @@ fn execute_repl_snippet(repl: &mut MontyRepl<impl ResourceTracker>, snippet: &st
 ///
 /// Returns an error string for unsupported suspend points (OS calls or async
 /// futures) or invalid external-function dispatch.
-fn run_until_complete(mut progress: RunProgress<impl ResourceTracker>) -> Result<MontyObject, String> {
+fn run_until_complete(mut progress: RunProgress) -> Result<MontyObject, String> {
     loop {
         match progress {
             RunProgress::Complete(value) => return Ok(value),

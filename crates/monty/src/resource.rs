@@ -22,7 +22,7 @@ pub const LARGE_RESULT_THRESHOLD: usize = 100_000;
 /// Used for sequence repeats (`'x' * 999_999_999`), padding operations
 /// (`str.ljust`, `str.center`, `str.zfill`, etc.), and any other operation
 /// where the result size is a simple product of two known values.
-pub fn check_repeat_size(item_len: usize, count: usize, tracker: &impl ResourceTracker) -> Result<(), ResourceError> {
+pub fn check_repeat_size(item_len: usize, count: usize, tracker: &dyn ResourceTracker) -> Result<(), ResourceError> {
     check_estimated_size(item_len.saturating_mul(count), tracker)
 }
 
@@ -36,7 +36,7 @@ pub fn check_repeat_size(item_len: usize, count: usize, tracker: &impl ResourceT
 /// which allocates intermediate values on the Rust heap (not tracked by the resource tracker).
 /// At peak, old/new base and old/new accumulator coexist simultaneously during each
 /// multiplication step, requiring roughly 4× the final result size in memory.
-pub fn check_pow_size(base_bits: u64, exponent: u64, tracker: &impl ResourceTracker) -> Result<(), ResourceError> {
+pub fn check_pow_size(base_bits: u64, exponent: u64, tracker: &dyn ResourceTracker) -> Result<(), ResourceError> {
     // 0**n = 0, 1**n = 1, (-1)**n = ±1 — always small
     if base_bits <= 1 {
         return Ok(());
@@ -51,7 +51,7 @@ pub fn check_pow_size(base_bits: u64, exponent: u64, tracker: &impl ResourceTrac
 /// Pre-checks that an integer multiplication won't exceed resource limits.
 ///
 /// The result of multiplying two numbers has at most `a_bits + b_bits` bits.
-pub fn check_mult_size(a_bits: u64, b_bits: u64, tracker: &impl ResourceTracker) -> Result<(), ResourceError> {
+pub fn check_mult_size(a_bits: u64, b_bits: u64, tracker: &dyn ResourceTracker) -> Result<(), ResourceError> {
     check_estimated_size(estimate_bits_to_bytes(a_bits.saturating_add(b_bits)), tracker)
 }
 
@@ -62,7 +62,7 @@ pub fn check_mult_size(a_bits: u64, b_bits: u64, tracker: &impl ResourceTracker)
 pub fn check_lshift_size(
     value_bits: u64,
     shift_amount: u64,
-    tracker: &impl ResourceTracker,
+    tracker: &dyn ResourceTracker,
 ) -> Result<(), ResourceError> {
     if value_bits == 0 {
         return Ok(());
@@ -74,7 +74,7 @@ pub fn check_lshift_size(
 ///
 /// Division results are bounded by the dividend size, but we still check for consistency
 /// with other BigInt promotion paths.
-pub fn check_div_size(dividend_bits: u64, tracker: &impl ResourceTracker) -> Result<(), ResourceError> {
+pub fn check_div_size(dividend_bits: u64, tracker: &dyn ResourceTracker) -> Result<(), ResourceError> {
     check_estimated_size(estimate_bits_to_bytes(dividend_bits), tracker)
 }
 
@@ -92,7 +92,7 @@ pub fn check_replace_size(
     old_len: usize,
     new_len: usize,
     count: i64,
-    tracker: &impl ResourceTracker,
+    tracker: &dyn ResourceTracker,
 ) -> Result<(), ResourceError> {
     // Empty pattern (old_len == 0): inserts before each element + after the last = input_len + 1
     let max_replacements = input_len
@@ -117,10 +117,7 @@ pub fn check_replace_size(
 ///
 /// Only calls the tracker when the estimate exceeds `LARGE_RESULT_THRESHOLD`
 /// to avoid overhead on small operations.
-pub(crate) fn check_estimated_size(
-    estimated_bytes: usize,
-    tracker: &impl ResourceTracker,
-) -> Result<(), ResourceError> {
+pub(crate) fn check_estimated_size(estimated_bytes: usize, tracker: &dyn ResourceTracker) -> Result<(), ResourceError> {
     if estimated_bytes > LARGE_RESULT_THRESHOLD {
         tracker.check_large_result(estimated_bytes)?;
     }
@@ -235,7 +232,11 @@ impl From<ResourceError> for RunError {
 /// All implementations should eventually trigger garbage collection to handle
 /// reference cycles. The `should_gc` method controls *frequency*, not whether
 /// GC runs at all.
-pub trait ResourceTracker: fmt::Debug {
+///
+/// This trait is object-safe so that `Heap` can store a `Box<dyn ResourceTracker>`
+/// instead of being generic over the tracker type. The `Send` bound is required so
+/// that `Heap` (and types containing it) can be sent across threads.
+pub trait ResourceTracker: fmt::Debug + Send + 'static {
     /// Called before each heap allocation.
     ///
     /// Returns `Ok(())` if the allocation should proceed, or `Err(ResourceError)`
@@ -243,13 +244,13 @@ pub trait ResourceTracker: fmt::Debug {
     ///
     /// # Arguments
     /// * `size` - Approximate size in bytes of the allocation
-    fn on_allocate(&self, get_size: impl FnOnce() -> usize) -> Result<(), ResourceError>;
+    fn on_allocate(&self, size: usize) -> Result<(), ResourceError>;
 
     /// Called when memory is freed (during dec_ref or garbage collection).
     ///
     /// # Arguments
     /// * `size` - Size in bytes of the freed allocation
-    fn on_free(&self, get_size: impl FnOnce() -> usize);
+    fn on_free(&self, size: usize);
 
     /// Called periodically (at statement boundaries) to check time limits.
     ///
@@ -293,6 +294,27 @@ pub trait ResourceTracker: fmt::Debug {
     /// # Arguments
     /// * `additional_bytes` - Approximate additional memory consumed by the growth
     fn on_grow(&self, additional_bytes: usize) -> Result<(), ResourceError>;
+
+    /// Sets the maximum execution duration and resets the start time to now.
+    ///
+    /// This is useful when resuming execution after an external function call
+    /// where you want to enforce a different (typically shorter) time limit
+    /// for the resumed phase without counting the time spent in the host.
+    ///
+    /// The default implementation does nothing — trackers without time limits
+    /// can ignore this.
+    fn set_max_duration(&mut self, _duration: Duration) {}
+
+    /// Returns a serializable snapshot of this tracker's state.
+    ///
+    /// Used by `Heap`'s serde implementation to persist tracker state across
+    /// snapshot serialization. On deserialization, `TrackerState::into_tracker()`
+    /// reconstructs a `Box<dyn ResourceTracker>` from the serialized state.
+    ///
+    /// Wrapper trackers (e.g. signal-checking wrappers) should delegate to their
+    /// inner tracker's state — the wrapper behaviour is re-applied by the host
+    /// after deserialization.
+    fn tracker_state(&self) -> TrackerState;
 }
 
 /// A resource tracker that imposes no limits except default recursion limit.
@@ -303,12 +325,12 @@ pub struct NoLimitTracker;
 
 impl ResourceTracker for NoLimitTracker {
     #[inline]
-    fn on_allocate(&self, _: impl FnOnce() -> usize) -> Result<(), ResourceError> {
+    fn on_allocate(&self, _size: usize) -> Result<(), ResourceError> {
         Ok(())
     }
 
     #[inline]
-    fn on_free(&self, _: impl FnOnce() -> usize) {}
+    fn on_free(&self, _size: usize) {}
 
     #[inline]
     fn check_time(&self) -> Result<(), ResourceError> {
@@ -341,6 +363,10 @@ impl ResourceTracker for NoLimitTracker {
     fn check_large_result(&self, _estimated_bytes: usize) -> Result<(), ResourceError> {
         // No limit - always allow operations regardless of result size
         Ok(())
+    }
+
+    fn tracker_state(&self) -> TrackerState {
+        TrackerState::NoLimit
     }
 }
 
@@ -487,20 +513,10 @@ impl LimitedTracker {
     pub fn elapsed(&self) -> Duration {
         self.start_time.elapsed()
     }
-
-    /// Sets the maximum execution duration and resets the start time to now.
-    ///
-    /// This is useful when resuming execution after an external function call
-    /// where you want to enforce a different (typically shorter) time limit
-    /// for the resumed phase without counting the time spent in the host.
-    pub fn set_max_duration(&mut self, duration: Duration) {
-        self.limits.max_duration = Some(duration);
-        self.start_time = Instant::now();
-    }
 }
 
 impl ResourceTracker for LimitedTracker {
-    fn on_allocate(&self, get_size: impl FnOnce() -> usize) -> Result<(), ResourceError> {
+    fn on_allocate(&self, size: usize) -> Result<(), ResourceError> {
         let count = self.allocation_count.get();
         // Check allocation count limit
         if let Some(max) = self.limits.max_allocations
@@ -512,7 +528,6 @@ impl ResourceTracker for LimitedTracker {
             });
         }
 
-        let size = get_size();
         // Check memory limit
         let current_mem = self.current_memory.get();
         if let Some(max) = self.limits.max_memory {
@@ -532,9 +547,9 @@ impl ResourceTracker for LimitedTracker {
         Ok(())
     }
 
-    fn on_free(&self, get_size: impl FnOnce() -> usize) {
+    fn on_free(&self, size: usize) {
         let current = self.current_memory.get();
-        self.current_memory.set(current.saturating_sub(get_size()));
+        self.current_memory.set(current.saturating_sub(size));
     }
 
     fn on_grow(&self, additional_bytes: usize) -> Result<(), ResourceError> {
@@ -598,5 +613,63 @@ impl ResourceTracker for LimitedTracker {
             }
         }
         Ok(())
+    }
+
+    fn set_max_duration(&mut self, duration: Duration) {
+        self.limits.max_duration = Some(duration);
+        self.start_time = Instant::now();
+    }
+
+    fn tracker_state(&self) -> TrackerState {
+        TrackerState::Limited {
+            limits: self.limits.clone(),
+            allocation_count: self.allocation_count.get(),
+            current_memory: self.current_memory.get(),
+        }
+    }
+}
+
+/// Serializable snapshot of a resource tracker's state.
+///
+/// Used to persist tracker state during snapshot serialization so that resource
+/// tracking can be restored when a snapshot is loaded. The enum covers the two
+/// built-in tracker types; wrapper trackers (e.g. signal-checking wrappers)
+/// delegate to their inner tracker's state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum TrackerState {
+    /// No resource limits (except default recursion limit).
+    NoLimit,
+    /// Configurable resource limits with tracked allocation/memory state.
+    Limited {
+        /// The resource limit configuration.
+        limits: ResourceLimits,
+        /// Cumulative allocation count at the time of serialization.
+        allocation_count: usize,
+        /// Approximate current memory usage at the time of serialization.
+        current_memory: usize,
+    },
+}
+
+impl TrackerState {
+    /// Reconstructs a boxed resource tracker from serialized state.
+    ///
+    /// The returned tracker resumes tracking from the serialized allocation count
+    /// and memory usage. Time limits restart from zero (matching `LimitedTracker`'s
+    /// existing deserialization behaviour where `start_time` resets to `Instant::now()`).
+    #[must_use]
+    pub fn into_tracker(self) -> Box<dyn ResourceTracker> {
+        match self {
+            Self::NoLimit => Box::new(NoLimitTracker),
+            Self::Limited {
+                limits,
+                allocation_count,
+                current_memory,
+            } => {
+                let tracker = LimitedTracker::new(limits);
+                tracker.allocation_count.set(allocation_count);
+                tracker.current_memory.set(current_memory);
+                Box::new(tracker)
+            }
+        }
     }
 }

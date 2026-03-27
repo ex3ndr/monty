@@ -21,7 +21,6 @@ use crate::{
     bytecode::{CallResult, VM},
     exception_private::{ExcType, RunResult, SimpleException},
     heap::{DropWithHeap, HeapId},
-    resource::ResourceTracker,
     value::{EitherStr, Value},
 };
 
@@ -46,13 +45,13 @@ pub trait PyTrait<'h> {
     ///
     /// Used for error messages and the `type()` builtin.
     /// Takes heap reference for cases where nested Value lookups are needed.
-    fn py_type(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> Type;
+    fn py_type(&self, vm: &VM<'h, '_>) -> Type;
 
     /// Returns the number of elements in this container.
     ///
     /// For interns, returns the number of Unicode codepoints (characters), matching Python.
     /// Returns `None` if the type doesn't support `len()`.
-    fn py_len(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> Option<usize>;
+    fn py_len(&self, vm: &VM<'h, '_>) -> Option<usize>;
 
     /// Python equality comparison (`==`).
     ///
@@ -64,7 +63,7 @@ pub trait PyTrait<'h> {
     ///
     /// Returns `Ok(true)` if equal, `Ok(false)` if not equal, or
     /// `Err(ResourceError::Recursion)` if maximum depth is exceeded.
-    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> Result<bool, ResourceError>;
+    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_>) -> Result<bool, ResourceError>;
 
     /// Python comparison (`<`, `>`, etc.).
     ///
@@ -76,18 +75,14 @@ pub trait PyTrait<'h> {
     ///
     /// Returns `Ok(Some(Ordering))` for comparable values, `Ok(None)` if not comparable,
     /// or `Err(ResourceError::Recursion)` if maximum depth is exceeded.
-    fn py_cmp(
-        &self,
-        _other: &Self,
-        _vm: &mut VM<'h, '_, impl ResourceTracker>,
-    ) -> Result<Option<Ordering>, ResourceError> {
+    fn py_cmp(&self, _other: &Self, _vm: &mut VM<'h, '_>) -> Result<Option<Ordering>, ResourceError> {
         Ok(None)
     }
 
     /// Returns the truthiness of the value following Python semantics.
     ///
     /// Container types should typically report `false` when empty.
-    fn py_bool(&self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> bool {
+    fn py_bool(&self, vm: &mut VM<'h, '_>) -> bool {
         self.py_len(vm) != Some(0)
     }
 
@@ -103,17 +98,12 @@ pub trait PyTrait<'h> {
     /// * `f` - The formatter to write to
     /// * `vm` - The VM for resolving value references and looking up interned strings
     /// * `heap_ids` - Set of heap IDs currently being repr'd (for cycle detection)
-    fn py_repr_fmt(
-        &self,
-        f: &mut impl Write,
-        vm: &VM<'h, '_, impl ResourceTracker>,
-        heap_ids: &mut AHashSet<HeapId>,
-    ) -> RunResult<()>;
+    fn py_repr_fmt(&self, f: &mut impl Write, vm: &VM<'h, '_>, heap_ids: &mut AHashSet<HeapId>) -> RunResult<()>;
 
     /// Returns the Python `repr()` string for this value.
     ///
     /// Convenience wrapper around `py_repr_fmt` that returns an owned string.
-    fn py_repr(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> RunResult<Cow<'static, str>> {
+    fn py_repr(&self, vm: &VM<'h, '_>) -> RunResult<Cow<'static, str>> {
         let mut s = String::new();
         let mut heap_ids = AHashSet::new();
         self.py_repr_fmt(&mut s, vm, &mut heap_ids)?;
@@ -121,7 +111,7 @@ pub trait PyTrait<'h> {
     }
 
     /// Returns the Python `str()` string for this value.
-    fn py_str(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> RunResult<Cow<'static, str>> {
+    fn py_str(&self, vm: &VM<'h, '_>) -> RunResult<Cow<'static, str>> {
         self.py_repr(vm)
     }
 
@@ -129,11 +119,7 @@ pub trait PyTrait<'h> {
     ///
     /// Returns `Ok(None)` if the operation is not supported for these types,
     /// `Ok(Some(value))` on success, or `Err(ResourceError)` if allocation fails.
-    fn py_add(
-        &self,
-        _other: &Self,
-        _vm: &mut VM<'h, '_, impl ResourceTracker>,
-    ) -> Result<Option<Value>, ResourceError> {
+    fn py_add(&self, _other: &Self, _vm: &mut VM<'h, '_>) -> Result<Option<Value>, ResourceError> {
         Ok(None)
     }
 
@@ -141,11 +127,7 @@ pub trait PyTrait<'h> {
     ///
     /// Returns `Ok(None)` if the operation is not supported for these types,
     /// `Ok(Some(value))` on success, or `Err(ResourceError)` if allocation fails.
-    fn py_sub(
-        &self,
-        _other: &Self,
-        _vm: &mut VM<'h, '_, impl ResourceTracker>,
-    ) -> Result<Option<Value>, ResourceError> {
+    fn py_sub(&self, _other: &Self, _vm: &mut VM<'h, '_>) -> Result<Option<Value>, ResourceError> {
         Ok(None)
     }
 
@@ -153,7 +135,7 @@ pub trait PyTrait<'h> {
     ///
     /// Returns `Ok(None)` if the operation is not supported for these types,
     /// `Ok(Some(value))` on success, or `Err(RunError)` if an error occurs.
-    fn py_mod(&self, _other: &Self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<Value>> {
+    fn py_mod(&self, _other: &Self, _vm: &mut VM<'h, '_>) -> RunResult<Option<Value>> {
         Ok(None)
     }
 
@@ -171,7 +153,7 @@ pub trait PyTrait<'h> {
     fn py_iadd(
         &mut self,
         _other: &Value,
-        _vm: &mut VM<'h, '_, impl ResourceTracker>,
+        _vm: &mut VM<'h, '_>,
         _self_id: Option<HeapId>,
     ) -> Result<bool, ResourceError> {
         Ok(false)
@@ -182,7 +164,7 @@ pub trait PyTrait<'h> {
     /// Returns `Ok(None)` if the operation is not supported for these types.
     /// For numeric types: Int * Int, Float * Float, Int * Float, etc.
     /// For sequences: str * int, list * int for repetition.
-    fn py_mult(&self, _other: &Self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<Value>> {
+    fn py_mult(&self, _other: &Self, _vm: &mut VM<'h, '_>) -> RunResult<Option<Value>> {
         Ok(None)
     }
 
@@ -190,7 +172,7 @@ pub trait PyTrait<'h> {
     ///
     /// Always returns float for numeric types. Returns `Ok(None)` if not supported.
     /// Returns `Err(ZeroDivisionError)` for division by zero.
-    fn py_div(&self, _other: &Self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<Value>> {
+    fn py_div(&self, _other: &Self, _vm: &mut VM<'h, '_>) -> RunResult<Option<Value>> {
         Ok(None)
     }
 
@@ -199,7 +181,7 @@ pub trait PyTrait<'h> {
     /// Returns int for int//int, float for float operations.
     /// Returns `Ok(None)` if not supported.
     /// Returns `Err(ZeroDivisionError)` for division by zero.
-    fn py_floordiv(&self, _other: &Self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<Value>> {
+    fn py_floordiv(&self, _other: &Self, _vm: &mut VM<'h, '_>) -> RunResult<Option<Value>> {
         Ok(None)
     }
 
@@ -208,7 +190,7 @@ pub trait PyTrait<'h> {
     /// Int ** positive_int returns int, int ** negative_int returns float.
     /// Returns `Ok(None)` if not supported.
     /// Returns `Err(ZeroDivisionError)` for 0 ** negative.
-    fn py_pow(&self, _other: &Self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<Value>> {
+    fn py_pow(&self, _other: &Self, _vm: &mut VM<'h, '_>) -> RunResult<Option<Value>> {
         Ok(None)
     }
 
@@ -238,7 +220,7 @@ pub trait PyTrait<'h> {
     fn py_call_attr(
         &mut self,
         _self_id: HeapId,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
+        vm: &mut VM<'h, '_>,
         attr: &EitherStr,
         args: ArgValues,
     ) -> RunResult<CallResult> {
@@ -259,7 +241,7 @@ pub trait PyTrait<'h> {
     /// and access to interned string content.
     ///
     /// Default implementation returns TypeError.
-    fn py_getitem(&self, _key: &Value, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Value> {
+    fn py_getitem(&self, _key: &Value, vm: &mut VM<'h, '_>) -> RunResult<Value> {
         Err(ExcType::type_error_not_sub(self.py_type(vm)))
     }
 
@@ -269,7 +251,7 @@ pub trait PyTrait<'h> {
     /// or the type doesn't support subscript assignment.
     ///
     /// Default implementation returns TypeError.
-    fn py_setitem(&mut self, key: Value, value: Value, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<()> {
+    fn py_setitem(&mut self, key: Value, value: Value, vm: &mut VM<'h, '_>) -> RunResult<()> {
         key.drop_with_heap(vm);
         value.drop_with_heap(vm);
         Err(SimpleException::new_msg(
@@ -295,11 +277,7 @@ pub trait PyTrait<'h> {
     ///
     /// Default implementation returns `Ok(None)`, indicating the type doesn't support
     /// attribute access and a generic `AttributeError` should be raised by the caller.
-    fn py_getattr(
-        &self,
-        _attr: &EitherStr,
-        _vm: &mut VM<'h, '_, impl ResourceTracker>,
-    ) -> RunResult<Option<CallResult>> {
+    fn py_getattr(&self, _attr: &EitherStr, _vm: &mut VM<'h, '_>) -> RunResult<Option<CallResult>> {
         Ok(None)
     }
 }

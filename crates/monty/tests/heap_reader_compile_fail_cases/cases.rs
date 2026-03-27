@@ -18,7 +18,7 @@ use super::*;
 ///
 /// Expected: E0502 (cannot borrow `*heap` as mutable because it is also borrowed as immutable)
 #[cfg(heap_reader_compile_fail_test_heap_mutation_while_reading)]
-fn heap_mutation_while_reading(list_id: HeapId, heap: &mut Heap<impl ResourceTracker>) {
+fn heap_mutation_while_reading(list_id: HeapId, heap: &mut Heap) {
     HeapReader::with(heap, |heap| {
         let a = match heap.read(list_id) {
             HeapReadOutput::List(list) => list,
@@ -37,7 +37,7 @@ fn heap_mutation_while_reading(list_id: HeapId, heap: &mut Heap<impl ResourceTra
 ///
 /// Expected: E0499 (cannot borrow `*heap` as mutable more than once at a time)
 #[cfg(heap_reader_compile_fail_test_double_get_mut)]
-fn double_get_mut(list_id: HeapId, heap: &mut Heap<impl ResourceTracker>) {
+fn double_get_mut(list_id: HeapId, heap: &mut Heap) {
     HeapReader::with(heap, |heap| {
         let mut a = match heap.read(list_id) {
             HeapReadOutput::List(list) => list,
@@ -60,7 +60,7 @@ fn double_get_mut(list_id: HeapId, heap: &mut Heap<impl ResourceTracker>) {
 ///
 /// Expected: E0502 (cannot borrow `*heap` as mutable because it is also borrowed as immutable)
 #[cfg(heap_reader_compile_fail_test_dec_ref_while_reading)]
-fn dec_ref_while_reading(list_id: HeapId, heap: &mut Heap<impl ResourceTracker>) {
+fn dec_ref_while_reading(list_id: HeapId, heap: &mut Heap) {
     HeapReader::with(heap, |heap| {
         let a = match heap.read(list_id) {
             HeapReadOutput::List(list) => list,
@@ -79,7 +79,7 @@ fn dec_ref_while_reading(list_id: HeapId, heap: &mut Heap<impl ResourceTracker>)
 ///
 /// Expected: E0521 (borrowed data escapes outside of closure)
 #[cfg(heap_reader_compile_fail_test_smuggle_heap_read)]
-fn smuggle_heap_read(list_id: HeapId, heap: &mut Heap<impl ResourceTracker>) {
+fn smuggle_heap_read(list_id: HeapId, heap: &mut Heap) {
     let mut smuggled: Option<HeapRead<'_, List>> = None;
     HeapReader::with(heap, |heap| {
         let a = match heap.read(list_id) {
@@ -99,7 +99,7 @@ fn smuggle_heap_read(list_id: HeapId, heap: &mut Heap<impl ResourceTracker>) {
 ///
 /// Expected: E0500 (closure requires unique access to `*heap` but it is already borrowed)
 #[cfg(heap_reader_compile_fail_test_mutation_in_map_closure)]
-fn mutation_in_map_closure(list_id: HeapId, other_id: HeapId, heap: &mut Heap<impl ResourceTracker>) {
+fn mutation_in_map_closure(list_id: HeapId, other_id: HeapId, heap: &mut Heap) {
     HeapReader::with(heap, |heap| {
         let a = match heap.read(list_id) {
             HeapReadOutput::List(list) => list,
@@ -123,7 +123,7 @@ fn mutation_in_map_closure(list_id: HeapId, other_id: HeapId, heap: &mut Heap<im
 ///
 /// Expected: E0502 (cannot borrow `*heap` as mutable because it is also borrowed as immutable)
 #[cfg(heap_reader_compile_fail_test_read_while_ref_alive)]
-fn read_while_ref_alive(id_a: HeapId, id_b: HeapId, heap: &mut Heap<impl ResourceTracker>) {
+fn read_while_ref_alive(id_a: HeapId, id_b: HeapId, heap: &mut Heap) {
     HeapReader::with(heap, |heap| {
         let a = match heap.read(id_a) {
             HeapReadOutput::List(list) => list,

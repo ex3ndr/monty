@@ -5,12 +5,11 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, RunError},
     heap::{HeapData, HeapGuard, HeapReadOutput},
-    resource::ResourceTracker,
     types::{PyTrait, Set, dict_view::collect_iterable_to_set, set::SetBinaryOp},
     value::BitwiseOp,
 };
 
-impl<T: ResourceTracker> VM<'_, '_, T> {
+impl VM<'_, '_> {
     /// Binary addition with proper refcount handling.
     ///
     /// Uses lazy type capture: only calls `py_type()` in error paths to avoid
@@ -431,12 +430,7 @@ enum DictViewBinaryOp {
 }
 
 /// Applies a set-like operator to two temporary sets and returns a plain `set`.
-fn apply_dict_view_binary_op(
-    lhs: &Set,
-    rhs: &Set,
-    op: DictViewBinaryOp,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
-) -> Result<Set, RunError> {
+fn apply_dict_view_binary_op(lhs: &Set, rhs: &Set, op: DictViewBinaryOp, vm: &mut VM<'_, '_>) -> Result<Set, RunError> {
     let mut result = match op {
         DictViewBinaryOp::And => Set::with_capacity(lhs.len().min(rhs.len())),
         DictViewBinaryOp::Or => Set::with_capacity(lhs.len() + rhs.len()),

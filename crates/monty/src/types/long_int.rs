@@ -21,7 +21,7 @@ use num_traits::{Signed, ToPrimitive, Zero};
 use crate::{
     exception_private::{ExcType, RunResult},
     heap::{Heap, HeapData},
-    resource::{ResourceError, ResourceTracker},
+    resource::ResourceError,
     value::Value,
 };
 
@@ -58,7 +58,7 @@ impl LongInt {
     /// For performance, we want to keep values as `Value::Int(i64)` whenever possible.
     /// This method checks if the value fits in an i64 and returns `Value::Int` if so,
     /// otherwise allocates a `HeapData::LongInt` on the heap.
-    pub fn into_value(self, heap: &Heap<impl ResourceTracker>) -> Result<Value, ResourceError> {
+    pub fn into_value(self, heap: &Heap) -> Result<Value, ResourceError> {
         // Try to demote back to i64 for performance
         if let Some(i) = self.0.to_i64() {
             Ok(Value::Int(i))

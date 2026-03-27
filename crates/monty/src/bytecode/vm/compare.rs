@@ -4,12 +4,11 @@ use super::VM;
 use crate::{
     defer_drop,
     exception_private::{ExcType, RunError},
-    resource::ResourceTracker,
     types::{LongInt, PyTrait},
     value::Value,
 };
 
-impl<T: ResourceTracker> VM<'_, '_, T> {
+impl VM<'_, '_> {
     /// Equality comparison.
     pub(super) fn compare_eq(&mut self) -> Result<(), RunError> {
         let this = self;

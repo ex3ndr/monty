@@ -1,7 +1,6 @@
 use std::{mem::ManuallyDrop, ptr::addr_of};
 
 use crate::{
-    ResourceTracker,
     heap::{Heap, HeapId, RecursionToken},
     value::Value,
 };
@@ -49,13 +48,11 @@ pub(crate) trait HeapItem {
 /// This trait represents types that contain a `Heap`; it allows for more complex structures
 /// to participate in the `HeapGuard` pattern.
 pub(crate) trait ContainsHeap {
-    type ResourceTracker: ResourceTracker;
-    fn heap(&self) -> &Heap<Self::ResourceTracker>;
-    fn heap_mut(&mut self) -> &mut Heap<Self::ResourceTracker>;
+    fn heap(&self) -> &Heap;
+    fn heap_mut(&mut self) -> &mut Heap;
 }
 
-impl<T: ResourceTracker> ContainsHeap for Heap<T> {
-    type ResourceTracker = T;
+impl ContainsHeap for Heap {
     fn heap(&self) -> &Self {
         self
     }
@@ -81,19 +78,19 @@ impl<T: ResourceTracker> ContainsHeap for Heap<T> {
 /// types that hold heap references.
 pub(crate) trait DropWithHeap: Sized {
     /// Consume `self` and decrement reference counts for any heap-allocated values contained within.
-    fn drop_with_heap<H: ContainsHeap>(self, heap: &mut H);
+    fn drop_with_heap(self, heap: &mut impl ContainsHeap);
 }
 
 impl DropWithHeap for Value {
     #[inline]
-    fn drop_with_heap<H: ContainsHeap>(self, heap: &mut H) {
+    fn drop_with_heap(self, heap: &mut impl ContainsHeap) {
         Self::drop_with_heap(self, heap);
     }
 }
 
 impl<U: DropWithHeap> DropWithHeap for Option<U> {
     #[inline]
-    fn drop_with_heap<H: ContainsHeap>(self, heap: &mut H) {
+    fn drop_with_heap(self, heap: &mut impl ContainsHeap) {
         if let Some(value) = self {
             value.drop_with_heap(heap);
         }
@@ -101,7 +98,7 @@ impl<U: DropWithHeap> DropWithHeap for Option<U> {
 }
 
 impl<U: DropWithHeap> DropWithHeap for Vec<U> {
-    fn drop_with_heap<H: ContainsHeap>(self, heap: &mut H) {
+    fn drop_with_heap(self, heap: &mut impl ContainsHeap) {
         for value in self {
             value.drop_with_heap(heap);
         }
@@ -109,7 +106,7 @@ impl<U: DropWithHeap> DropWithHeap for Vec<U> {
 }
 
 impl<U: DropWithHeap> DropWithHeap for std::vec::IntoIter<U> {
-    fn drop_with_heap<H: ContainsHeap>(self, heap: &mut H) {
+    fn drop_with_heap(self, heap: &mut impl ContainsHeap) {
         for value in self {
             value.drop_with_heap(heap);
         }
@@ -117,7 +114,7 @@ impl<U: DropWithHeap> DropWithHeap for std::vec::IntoIter<U> {
 }
 
 impl<U: DropWithHeap> DropWithHeap for std::vec::Drain<'_, U> {
-    fn drop_with_heap<H: ContainsHeap>(self, heap: &mut H) {
+    fn drop_with_heap(self, heap: &mut impl ContainsHeap) {
         for value in self {
             value.drop_with_heap(heap);
         }
@@ -125,7 +122,7 @@ impl<U: DropWithHeap> DropWithHeap for std::vec::Drain<'_, U> {
 }
 
 impl<const N: usize> DropWithHeap for [Value; N] {
-    fn drop_with_heap<H: ContainsHeap>(self, heap: &mut H) {
+    fn drop_with_heap(self, heap: &mut impl ContainsHeap) {
         for value in self {
             value.drop_with_heap(heap);
         }
@@ -133,7 +130,7 @@ impl<const N: usize> DropWithHeap for [Value; N] {
 }
 
 impl<U: DropWithHeap, V: DropWithHeap> DropWithHeap for (U, V) {
-    fn drop_with_heap<H: ContainsHeap>(self, heap: &mut H) {
+    fn drop_with_heap(self, heap: &mut impl ContainsHeap) {
         let (left, right) = self;
         left.drop_with_heap(heap);
         right.drop_with_heap(heap);
@@ -150,19 +147,19 @@ impl<U: DropWithHeap, V: DropWithHeap> DropWithHeap for (U, V) {
 /// counter via interior mutability (`Cell`).
 pub(crate) trait DropWithImmutableHeap {
     /// Consume `self` and perform cleanup using an immutable heap reference.
-    fn drop_with_immutable_heap<T: ResourceTracker>(self, heap: &Heap<T>);
+    fn drop_with_immutable_heap(self, heap: &Heap);
 }
 
 impl DropWithImmutableHeap for RecursionToken {
     #[inline]
-    fn drop_with_immutable_heap<T: ResourceTracker>(self, heap: &Heap<T>) {
+    fn drop_with_immutable_heap(self, heap: &Heap) {
         heap.decr_recursion_depth();
     }
 }
 
 /// RAII guard that ensures a [`DropWithImmutableHeap`] value is cleaned up on every code path.
 ///
-/// Like [`HeapGuard`], but holds an immutable `&Heap<T>` instead of requiring `&mut` access
+/// Like [`HeapGuard`], but holds an immutable `&Heap` instead of requiring `&mut` access
 /// via [`ContainsHeap`]. This is useful in contexts that only have shared access to the heap,
 /// such as `py_repr_fmt` formatting methods.
 ///
@@ -335,7 +332,7 @@ macro_rules! defer_drop_mut {
 /// for cleanup.
 ///
 /// Creates an [`ImmutableHeapGuard`] and immediately rebinds `$value` as `&V` and `$heap`
-/// as `&Heap<T>`. The guard will call [`DropWithImmutableHeap::drop_with_immutable_heap`]
+/// as `&Heap`. The guard will call [`DropWithImmutableHeap::drop_with_immutable_heap`]
 /// when scope exits. Use this for values like [`RecursionToken`] in contexts that only have
 /// shared access to the heap (e.g., `py_repr_fmt` formatting methods).
 #[macro_export]

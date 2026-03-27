@@ -3,7 +3,7 @@ use std::sync::{Mutex, PoisonError};
 // Use `::monty` to refer to the external crate (not the pymodule)
 use ::monty::{
     ExtFunctionResult, LimitedTracker, MontyException, MontyObject, MontyRepl as CoreMontyRepl, NameLookupResult,
-    NoLimitTracker, PrintWriter, ReplProgress, ReplStartError, ResourceTracker,
+    NoLimitTracker, PrintWriter, ReplProgress, ReplStartError,
 };
 use monty::ExcType;
 use pyo3::{
@@ -22,16 +22,6 @@ use crate::{
     monty_cls::CallbackStringPrint,
 };
 
-/// Runtime REPL session holder for pyclass interoperability.
-///
-/// PyO3 classes cannot be generic, so this enum stores REPL sessions for both
-/// resource tracker variants.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) enum EitherRepl {
-    NoLimit(CoreMontyRepl<PySignalTracker<NoLimitTracker>>),
-    Limited(CoreMontyRepl<PySignalTracker<LimitedTracker>>),
-}
-
 /// Stateful no-replay REPL session.
 ///
 /// Create with `MontyRepl()` then call `feed_run()` to execute snippets
@@ -43,7 +33,7 @@ pub(crate) enum EitherRepl {
 #[pyclass(name = "MontyRepl", module = "pydantic_monty", frozen)]
 #[derive(Debug)]
 pub struct PyMontyRepl {
-    repl: Mutex<Option<EitherRepl>>,
+    repl: Mutex<Option<CoreMontyRepl>>,
     dc_registry: DcRegistry,
 
     /// Name of the script being executed.
@@ -70,10 +60,10 @@ impl PyMontyRepl {
 
         let repl = if let Some(limits) = limits {
             let tracker = PySignalTracker::new(LimitedTracker::new(extract_limits(limits)?));
-            EitherRepl::Limited(CoreMontyRepl::new(&script_name, tracker))
+            CoreMontyRepl::new(&script_name, tracker)
         } else {
             let tracker = PySignalTracker::new(NoLimitTracker);
-            EitherRepl::NoLimit(CoreMontyRepl::new(&script_name, tracker))
+            CoreMontyRepl::new(&script_name, tracker)
         };
 
         Ok(Self {
@@ -129,11 +119,9 @@ impl PyMontyRepl {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("REPL session is currently executing another snippet"))?;
 
-        let output = match repl {
-            EitherRepl::NoLimit(repl) => repl.feed_run(code, input_values, print_writer.reborrow()),
-            EitherRepl::Limited(repl) => repl.feed_run(code, input_values, print_writer.reborrow()),
-        }
-        .map_err(|e| MontyError::new_err(py, e))?;
+        let output = repl
+            .feed_run(code, input_values, print_writer.reborrow())
+            .map_err(|e| MontyError::new_err(py, e))?;
 
         Ok(monty_to_py(py, &output, &self.dc_registry)?.into_bound(py))
     }
@@ -176,29 +164,18 @@ impl PyMontyRepl {
         let dc_registry = this.dc_registry.clone_ref(py);
         let script_name = this.script_name.clone();
 
-        match repl {
-            EitherRepl::NoLimit(repl) => {
-                let progress = py
-                    .detach(|| repl.feed_start(&code_owned, inputs_owned, print_output.reborrow()))
-                    .map_err(|e| this.restore_repl_from_start_error(py, *e))?;
-                let either = crate::monty_cls::EitherProgress::ReplNoLimit(progress, repl_owner);
-                either.progress_or_complete(py, script_name, print_callback, dc_registry)
-            }
-            EitherRepl::Limited(repl) => {
-                let progress = py
-                    .detach(|| repl.feed_start(&code_owned, inputs_owned, print_output.reborrow()))
-                    .map_err(|e| this.restore_repl_from_start_error(py, *e))?;
-                let either = crate::monty_cls::EitherProgress::ReplLimited(progress, repl_owner);
-                either.progress_or_complete(py, script_name, print_callback, dc_registry)
-            }
-        }
+        let progress = py
+            .detach(|| repl.feed_start(&code_owned, inputs_owned, print_output.reborrow()))
+            .map_err(|e| this.restore_repl_from_start_error(py, *e))?;
+        let either = crate::monty_cls::EitherProgress::Repl(Box::new(progress), repl_owner);
+        either.progress_or_complete(py, script_name, print_callback, dc_registry)
     }
 
     /// Serializes this REPL session to bytes.
     fn dump<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         #[derive(serde::Serialize)]
         struct SerializedRepl<'a> {
-            repl: &'a EitherRepl,
+            repl: &'a CoreMontyRepl,
             script_name: &'a str,
         }
 
@@ -225,7 +202,7 @@ impl PyMontyRepl {
     ) -> PyResult<Self> {
         #[derive(serde::Deserialize)]
         struct SerializedReplOwned {
-            repl: EitherRepl,
+            repl: CoreMontyRepl,
             script_name: String,
         }
 
@@ -265,14 +242,7 @@ impl PyMontyRepl {
 
         let repl = self.take_repl()?;
 
-        let result = match repl {
-            EitherRepl::NoLimit(repl) => {
-                self.feed_start_loop(py, repl, code, input_values, external_functions, os, &mut print_output)
-            }
-            EitherRepl::Limited(repl) => {
-                self.feed_start_loop(py, repl, code, input_values, external_functions, os, &mut print_output)
-            }
-        };
+        let result = self.feed_start_loop(py, repl, code, input_values, external_functions, os, &mut print_output);
 
         // On error, the REPL is already restored inside `restore_repl_from_start_error`.
         match result {
@@ -286,21 +256,18 @@ impl PyMontyRepl {
 
     /// Runs the feed_start / resume loop for a specific resource tracker type.
     ///
-    /// Returns the output value and the restored REPL enum variant, or a Python error.
+    /// Returns the output value and the restored REPL, or a Python error.
     #[expect(clippy::too_many_arguments)]
-    fn feed_start_loop<T: ResourceTracker + Send>(
+    fn feed_start_loop(
         &self,
         py: Python<'_>,
-        repl: CoreMontyRepl<T>,
+        repl: CoreMontyRepl,
         code: &str,
         input_values: Vec<(String, MontyObject)>,
         external_functions: Option<&Bound<'_, PyDict>>,
         os: Option<&Bound<'_, PyAny>>,
         print_output: &mut SendWrapper<&mut PrintWriter<'_>>,
-    ) -> PyResult<(MontyObject, EitherRepl)>
-    where
-        EitherRepl: FromCoreRepl<T>,
-    {
+    ) -> PyResult<(MontyObject, CoreMontyRepl)> {
         let code_owned = code.to_owned();
         let mut progress = py
             .detach(|| repl.feed_start(&code_owned, input_values, print_output.reborrow()))
@@ -309,7 +276,7 @@ impl PyMontyRepl {
         loop {
             match progress {
                 ReplProgress::Complete { repl, value } => {
-                    return Ok((value, EitherRepl::from_core(repl)));
+                    return Ok((value, repl));
                 }
                 ReplProgress::FunctionCall(call) => {
                     let return_value = if call.method_call {
@@ -322,7 +289,7 @@ impl PyMontyRepl {
                             "External function '{}' called but no external_functions provided",
                             call.function_name
                         );
-                        self.put_repl(EitherRepl::from_core(call.into_repl()));
+                        self.put_repl(call.into_repl());
                         return Err(PyRuntimeError::new_err(msg));
                     };
 
@@ -380,7 +347,7 @@ impl PyMontyRepl {
                         .map_err(|e| self.restore_repl_from_start_error(py, *e))?;
                 }
                 ReplProgress::ResolveFutures(state) => {
-                    self.put_repl(EitherRepl::from_core(state.into_repl()));
+                    self.put_repl(state.into_repl());
                     return Err(PyRuntimeError::new_err(
                         "async futures not supported with `MontyRepl.feed_run`",
                     ));
@@ -391,7 +358,7 @@ impl PyMontyRepl {
 
     /// Takes the REPL out of the mutex for `feed_start` (which consumes self),
     /// leaving `None` until the REPL is restored via `put_repl`.
-    pub(crate) fn take_repl(&self) -> PyResult<EitherRepl> {
+    pub(crate) fn take_repl(&self) -> PyResult<CoreMontyRepl> {
         let mut guard = self
             .repl
             .try_lock()
@@ -415,18 +382,15 @@ impl PyMontyRepl {
     }
 
     /// Restores a REPL into the mutex after `feed_start` completes successfully.
-    pub(crate) fn put_repl(&self, repl: EitherRepl) {
+    pub(crate) fn put_repl(&self, repl: CoreMontyRepl) {
         let mut guard = self.repl.lock().unwrap_or_else(PoisonError::into_inner);
         *guard = Some(repl);
     }
 
     /// Extracts the REPL from a `ReplStartError`, restores it into `self.repl`,
     /// and returns the Python exception.
-    fn restore_repl_from_start_error<T: ResourceTracker>(&self, py: Python<'_>, err: ReplStartError<T>) -> PyErr
-    where
-        EitherRepl: FromCoreRepl<T>,
-    {
-        self.put_repl(EitherRepl::from_core(err.repl));
+    fn restore_repl_from_start_error(&self, py: Python<'_>, err: ReplStartError) -> PyErr {
+        self.put_repl(err.repl);
         MontyError::new_err(py, err.error)
     }
 }
@@ -448,23 +412,4 @@ fn extract_repl_inputs(
             Ok((name, obj))
         })
         .collect::<PyResult<_>>()
-}
-
-/// Helper trait to convert a typed `CoreMontyRepl<T>` back into the
-/// type-erased `EitherRepl` enum.
-pub(crate) trait FromCoreRepl<T: ResourceTracker> {
-    /// Wraps a core REPL into the appropriate `EitherRepl` variant.
-    fn from_core(repl: CoreMontyRepl<T>) -> Self;
-}
-
-impl FromCoreRepl<PySignalTracker<NoLimitTracker>> for EitherRepl {
-    fn from_core(repl: CoreMontyRepl<PySignalTracker<NoLimitTracker>>) -> Self {
-        Self::NoLimit(repl)
-    }
-}
-
-impl FromCoreRepl<PySignalTracker<LimitedTracker>> for EitherRepl {
-    fn from_core(repl: CoreMontyRepl<PySignalTracker<LimitedTracker>>) -> Self {
-        Self::Limited(repl)
-    }
 }

@@ -13,7 +13,6 @@ use std::cmp::Ordering;
 use crate::{
     bytecode::VM,
     exception_private::{ExcType, RunError},
-    resource::ResourceTracker,
     types::PyTrait,
     value::Value,
 };
@@ -30,7 +29,7 @@ pub fn sort_indices(
     indices: &mut [usize],
     values: &[Value],
     reverse: bool,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
+    vm: &mut VM<'_, '_>,
 ) -> Result<(), RunError> {
     let mut sort_error: Option<RunError> = None;
 

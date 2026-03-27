@@ -5,12 +5,12 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, RunError, SimpleException},
     fstring::{ParsedFormatSpec, ascii_escape, decode_format_spec, format_string, format_with_spec},
-    resource::{ResourceTracker, check_repeat_size},
+    resource::check_repeat_size,
     types::{PyTrait, str::allocate_string},
     value::Value,
 };
 
-impl<T: ResourceTracker> VM<'_, '_, T> {
+impl VM<'_, '_> {
     /// Builds an f-string by concatenating n string parts from the stack.
     pub(super) fn build_fstring(&mut self, count: usize) -> Result<(), RunError> {
         let this = self;

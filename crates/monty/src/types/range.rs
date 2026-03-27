@@ -13,7 +13,7 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, RunResult},
     heap::{Heap, HeapData, HeapId, HeapItem, HeapRead},
-    resource::{ResourceError, ResourceTracker},
+    resource::ResourceError,
     types::{PyTrait, Type},
     value::Value,
 };
@@ -116,7 +116,7 @@ impl Range {
     /// - `range(stop)` - range from 0 to stop
     /// - `range(start, stop)` - range from start to stop
     /// - `range(start, stop, step)` - range with custom step
-    pub fn init(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    pub fn init(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
         let pos_args = args.into_pos_only("range", vm.heap)?;
         defer_drop!(pos_args, vm);
 
@@ -150,7 +150,7 @@ impl Range {
     ///
     /// Returns a new range object representing the sliced view.
     /// The new range has computed start, stop, and step values.
-    fn getitem_slice(&self, slice: &crate::types::Slice, heap: &Heap<impl ResourceTracker>) -> RunResult<Value> {
+    fn getitem_slice(&self, slice: &crate::types::Slice, heap: &Heap) -> RunResult<Value> {
         let range_len = self.len();
         let (start, stop, step) = slice
             .indices(range_len)
@@ -203,15 +203,15 @@ impl Default for Range {
 }
 
 impl<'h> PyTrait<'h> for HeapRead<'h, Range> {
-    fn py_type(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Type {
+    fn py_type(&self, _vm: &VM<'h, '_>) -> Type {
         Type::Range
     }
 
-    fn py_len(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> Option<usize> {
+    fn py_len(&self, vm: &VM<'h, '_>) -> Option<usize> {
         Some(self.get(vm.heap).len())
     }
 
-    fn py_getitem(&self, key: &Value, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Value> {
+    fn py_getitem(&self, key: &Value, vm: &mut VM<'h, '_>) -> RunResult<Value> {
         // Check for slice first (Value::Ref pointing to HeapData::Slice)
         if let Value::Ref(id) = key
             && let HeapData::Slice(slice) = vm.heap.get(*id)
@@ -243,7 +243,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Range> {
         Ok(Value::Int(offset))
     }
 
-    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_>) -> Result<bool, ResourceError> {
         let a = self.get(vm.heap);
         let b = other.get(vm.heap);
         // Compare ranges by their actual sequences, not parameters.
@@ -260,16 +260,11 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Range> {
         Ok(a.start == b.start && a.step == b.step)
     }
 
-    fn py_bool(&self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> bool {
+    fn py_bool(&self, vm: &mut VM<'h, '_>) -> bool {
         !self.get(vm.heap).is_empty()
     }
 
-    fn py_repr_fmt(
-        &self,
-        f: &mut impl Write,
-        vm: &VM<'h, '_, impl ResourceTracker>,
-        _heap_ids: &mut AHashSet<HeapId>,
-    ) -> RunResult<()> {
+    fn py_repr_fmt(&self, f: &mut impl Write, vm: &VM<'h, '_>, _heap_ids: &mut AHashSet<HeapId>) -> RunResult<()> {
         let this = self.get(vm.heap);
         if this.step == 1 {
             Ok(write!(f, "range({}, {})", this.start, this.stop)?)

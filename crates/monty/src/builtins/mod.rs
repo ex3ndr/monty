@@ -40,7 +40,6 @@ use crate::{
     args::ArgValues,
     bytecode::VM,
     exception_private::{ExcType, RunResult},
-    resource::ResourceTracker,
     types::Type,
     value::Value,
 };
@@ -61,7 +60,7 @@ pub(crate) enum Builtins {
 
 impl Builtins {
     /// Calls this builtin with the given arguments.
-    pub fn call(self, vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    pub fn call(self, vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
         match self {
             Self::Function(b) => b.call(vm, args),
             Self::ExcType(exc) => exc.call(vm, args),
@@ -210,7 +209,7 @@ impl BuiltinsFunctions {
     ///
     /// All builtins receive the full VM context, which provides access to the heap,
     /// interned strings, and print output.
-    pub(crate) fn call(self, vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    pub(crate) fn call(self, vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
         match self {
             Self::Abs => abs::builtin_abs(vm, args),
             Self::All => all::builtin_all(vm, args),

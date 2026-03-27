@@ -13,9 +13,7 @@ use monty::{
 /// External functions are no longer declared upfront. Instead, the VM yields `NameLookup`
 /// when it encounters an unresolved name. This helper resolves all such lookups until
 /// a different progress variant is reached.
-fn resolve_name_lookups<T: monty::ResourceTracker>(
-    mut progress: RunProgress<T>,
-) -> Result<RunProgress<T>, monty::MontyException> {
+fn resolve_name_lookups(mut progress: RunProgress) -> Result<RunProgress, monty::MontyException> {
     while let RunProgress::NameLookup(lookup) = progress {
         let name = lookup.name.clone();
         progress = lookup.resume(

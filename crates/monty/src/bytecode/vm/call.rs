@@ -16,7 +16,6 @@ use crate::{
     heap_data::CellValue,
     intern::{FunctionId, StringId},
     os::OsFunction,
-    resource::ResourceTracker,
     types::{Dict, PyTrait, Type, bytes::call_bytes_method, str::call_str_method, r#type::call_type_method},
     value::{EitherStr, Value},
 };
@@ -56,7 +55,7 @@ pub(crate) enum CallResult {
     AwaitValue(Value),
 }
 
-impl<T: ResourceTracker> VM<'_, '_, T> {
+impl VM<'_, '_> {
     // ========================================================================
     // Call Opcode Executors
     // ========================================================================
@@ -703,7 +702,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
 
         // Track memory for this frame's locals
         let size = namespace_size * std::mem::size_of::<Value>();
-        self.heap.tracker_mut().on_allocate(|| size)?;
+        self.heap.tracker_mut().on_allocate(size)?;
 
         // 1. Create namespace for the frame in a temporary vec, will extend to stack later
         let namespace = Vec::with_capacity(func.namespace_size);
@@ -715,7 +714,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             let bind_result = func.signature.bind(args, defaults, this, func.name, namespace);
 
             if let Err(e) = bind_result {
-                this.heap.tracker_mut().on_free(|| size);
+                this.heap.tracker_mut().on_free(size);
                 return Err(e);
             }
         }

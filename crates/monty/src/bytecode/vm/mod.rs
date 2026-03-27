@@ -31,7 +31,6 @@ use crate::{
     modules::BuiltinModule,
     os::OsFunction,
     parse::CodeRange,
-    resource::ResourceTracker,
     types::{LongInt, MontyIter, PyTrait},
     value::{BitwiseOp, EitherStr, Value},
 };
@@ -519,7 +518,7 @@ pub struct VMSnapshot {
 /// # Lifetimes
 /// * `'a` - Lifetime of the heap, namespaces, and interns
 /// * `'p` - Lifetime of the print writer's internal references
-pub struct VM<'h, 'a, T: ResourceTracker> {
+pub struct VM<'h, 'a> {
     /// Operand stack — locals and operands interleaved per frame.
     ///
     /// Each function frame's locals occupy `stack[frame.stack_base..frame.stack_base + frame.locals_count]`,
@@ -538,7 +537,7 @@ pub struct VM<'h, 'a, T: ResourceTracker> {
     frames: Vec<CallFrame<'a>>,
 
     /// Heap for reference-counted objects.
-    pub(crate) heap: &'h mut HeapReader<'h, T>,
+    pub(crate) heap: &'h mut HeapReader<'h>,
 
     /// Interned strings/bytes.
     pub(crate) interns: &'a Interns,
@@ -582,11 +581,11 @@ pub struct VM<'h, 'a, T: ResourceTracker> {
     ext_function_load_ip: Option<usize>,
 }
 
-impl<'h, 'a, T: ResourceTracker> VM<'h, 'a, T> {
+impl<'h, 'a> VM<'h, 'a> {
     /// Creates a new VM with the given runtime context.
     pub fn new(
         globals: Vec<Value>,
-        heap: &'h mut HeapReader<'h, T>,
+        heap: &'h mut HeapReader<'h>,
         interns: &'a Interns,
         print_writer: PrintWriter<'a>,
     ) -> Self {
@@ -620,7 +619,7 @@ impl<'h, 'a, T: ResourceTracker> VM<'h, 'a, T> {
     pub fn restore(
         snapshot: VMSnapshot,
         module_code: &'a Code,
-        heap: &'h mut HeapReader<'h, T>,
+        heap: &'h mut HeapReader<'h>,
         interns: &'a Interns,
         print_writer: PrintWriter<'a>,
     ) -> Self {
@@ -1673,7 +1672,7 @@ impl<'h, 'a, T: ResourceTracker> VM<'h, 'a, T> {
         // Track freed memory for locals
         if frame.locals_count > 0 {
             let size = frame.locals_count as usize * std::mem::size_of::<Value>();
-            self.heap.tracker_mut().on_free(|| size);
+            self.heap.tracker_mut().on_free(size);
         }
     }
 
@@ -1927,12 +1926,11 @@ impl<'h, 'a, T: ResourceTracker> VM<'h, 'a, T> {
 }
 
 // `heap` is not a public field on VM, so this implementation needs to go here rather than in `heap.rs`
-impl<T: ResourceTracker> ContainsHeap for VM<'_, '_, T> {
-    type ResourceTracker = T;
-    fn heap(&self) -> &Heap<T> {
+impl ContainsHeap for VM<'_, '_> {
+    fn heap(&self) -> &Heap {
         self.heap
     }
-    fn heap_mut(&mut self) -> &mut Heap<T> {
+    fn heap_mut(&mut self) -> &mut Heap {
         self.heap
     }
 }

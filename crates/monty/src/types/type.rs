@@ -9,7 +9,6 @@ use crate::{
     exception_private::{ExcType, RunError, RunResult, SimpleException},
     heap::{DropWithHeap, Heap, HeapData},
     intern::{StaticStrings, StringId},
-    resource::ResourceTracker,
     types::{
         Bytes, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str, Tuple,
         bytes::bytes_fromhex, dict::dict_fromkeys, long_int::INT_MAX_STR_DIGITS, str::StringRepr,
@@ -235,7 +234,7 @@ impl Type {
     ///
     /// Dispatches to the appropriate type's init method for container types,
     /// or handles primitive type conversions inline.
-    pub(crate) fn call(self, vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    pub(crate) fn call(self, vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
         match self {
             // Container types - delegate to init methods
             Self::List => List::init(vm, args),
@@ -367,7 +366,7 @@ fn value_error_could_not_convert_string_to_float(value: &str) -> RunError {
 ///
 /// Handles whitespace stripping and removing `_` separators. Returns `Value::Int` if the value
 /// fits in i64, otherwise allocates a `LongInt` on the heap. Returns `ValueError` on failure.
-fn parse_int_from_str(value: &str, heap: &Heap<impl ResourceTracker>) -> RunResult<Value> {
+fn parse_int_from_str(value: &str, heap: &Heap) -> RunResult<Value> {
     let invalid = || ExcType::value_error_invalid_literal_for_int(StringRepr(value));
     // Try parsing as i64 first (fast path)
     if let Ok(int) = value.parse::<i64>() {
@@ -433,7 +432,7 @@ pub(crate) fn call_type_method(
     t: Type,
     method_id: StringId,
     args: ArgValues,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
+    vm: &mut VM<'_, '_>,
 ) -> Result<Value, RunError> {
     match (t, method_id) {
         (Type::Dict, m) if m == StaticStrings::Fromkeys => return dict_fromkeys(args, vm),

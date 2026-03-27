@@ -444,7 +444,7 @@ impl Scheduler {
     /// # Arguments
     /// * `task_id` - ID of the task to cancel
     /// * `heap` - Heap for dropping values and cell cleanup
-    pub fn cancel_task(&mut self, task_id: TaskId, heap: &mut HeapReader<'_, impl crate::resource::ResourceTracker>) {
+    pub fn cancel_task(&mut self, task_id: TaskId, heap: &mut HeapReader<'_>) {
         // If task already finished, clean up its result value and return
         if self.get_task(task_id).is_finished() {
             let task = self.get_task_mut(task_id);
@@ -568,7 +568,7 @@ impl Scheduler {
     /// Each task's `recursion_depth` is restored to the global counter before
     /// dropping cells, because `save_task_context` subtracted the recursion depth
     /// and cleanup needs the correct depth to avoid underflow.
-    pub fn cleanup(&mut self, heap: &mut crate::heap::Heap<impl crate::resource::ResourceTracker>) {
+    pub fn cleanup(&mut self, heap: &mut crate::heap::Heap) {
         // Drop pending call arguments
         for (_, data) in std::mem::take(&mut self.pending_calls) {
             data.args.drop_with_heap(heap);

@@ -13,7 +13,6 @@ use crate::{
     exception_private::{ExcType, RunError, SimpleException},
     expressions::ExprLoc,
     intern::StringId,
-    resource::ResourceTracker,
     types::{PyTrait, Type},
     value::Value,
 };
@@ -257,11 +256,7 @@ impl std::fmt::Display for FormatError {
 /// - Strings: `format_string`
 ///
 /// Returns a `ValueError` if the format type character is incompatible with the value type.
-pub fn format_with_spec(
-    value: &Value,
-    spec: &ParsedFormatSpec,
-    vm: &VM<'_, '_, impl ResourceTracker>,
-) -> Result<String, RunError> {
+pub fn format_with_spec(value: &Value, spec: &ParsedFormatSpec, vm: &VM<'_, '_>) -> Result<String, RunError> {
     let value_type = value.py_type(vm);
 
     match (value, spec.type_char) {

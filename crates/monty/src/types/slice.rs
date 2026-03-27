@@ -14,7 +14,7 @@ use crate::{
     exception_private::{ExcType, RunResult},
     heap::{HeapData, HeapId, HeapItem, HeapRead},
     intern::StaticStrings,
-    resource::{ResourceError, ResourceTracker},
+    resource::ResourceError,
     types::{PyTrait, Type},
     value::{EitherStr, Value},
 };
@@ -52,7 +52,7 @@ impl Slice {
     /// - `slice(start, stop, step)` - slice with all three components
     ///
     /// Each argument can be None to indicate "use default".
-    pub fn init(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    pub fn init(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
         let heap = &mut *vm.heap;
         let pos_args = args.into_pos_only("slice", heap)?;
         defer_drop!(pos_args, heap);
@@ -179,32 +179,27 @@ fn normalize_index(index: i64, length: i64, lower: i64, upper: i64) -> i64 {
 }
 
 impl<'h> PyTrait<'h> for HeapRead<'h, Slice> {
-    fn py_type(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Type {
+    fn py_type(&self, _vm: &VM<'h, '_>) -> Type {
         Type::Slice
     }
 
-    fn py_len(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Option<usize> {
+    fn py_len(&self, _vm: &VM<'h, '_>) -> Option<usize> {
         // Slices don't have a length in Python
         None
     }
 
-    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_>) -> Result<bool, ResourceError> {
         let a = self.get(vm.heap);
         let b = other.get(vm.heap);
         Ok(a.start == b.start && a.stop == b.stop && a.step == b.step)
     }
 
-    fn py_bool(&self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> bool {
+    fn py_bool(&self, _vm: &mut VM<'h, '_>) -> bool {
         // Slice always truthy
         true
     }
 
-    fn py_repr_fmt(
-        &self,
-        f: &mut impl Write,
-        vm: &VM<'h, '_, impl ResourceTracker>,
-        _heap_ids: &mut AHashSet<HeapId>,
-    ) -> RunResult<()> {
+    fn py_repr_fmt(&self, f: &mut impl Write, vm: &VM<'h, '_>, _heap_ids: &mut AHashSet<HeapId>) -> RunResult<()> {
         f.write_str("slice(")?;
         format_option_i64(f, self.get(vm.heap).start)?;
         f.write_str(", ")?;
@@ -214,7 +209,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Slice> {
         Ok(f.write_char(')')?)
     }
 
-    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<CallResult>> {
+    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, '_>) -> RunResult<Option<CallResult>> {
         let this = self.get(vm.heap);
         // Fast path: interned strings can be matched by ID without string comparison
         if let Some(ss) = attr.static_string() {

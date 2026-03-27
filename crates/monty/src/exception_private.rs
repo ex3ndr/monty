@@ -16,7 +16,6 @@ use crate::{
     heap::{HeapData, HeapRead},
     intern::{Interns, StaticStrings, StringId},
     parse::CodeRange,
-    resource::ResourceTracker,
     types::{
         PyTrait, Str, Type, allocate_tuple,
         long_int::INT_MAX_STR_DIGITS,
@@ -174,7 +173,7 @@ impl ExcType {
     ///
     /// The `interns` parameter provides access to interned string content.
     /// Returns a heap-allocated exception value.
-    pub(crate) fn call(self, vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    pub(crate) fn call(self, vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
         defer_drop!(args, vm);
         let exc = match args {
             ArgValues::Empty => Ok(SimpleException::new_none(self)),
@@ -327,7 +326,7 @@ impl ExcType {
     /// If the key's string conversion fails (e.g. huge LongInt exceeding
     /// `INT_MAX_STR_DIGITS`), falls back to the type name so that a
     /// `KeyError` is always raised rather than a spurious `ValueError`.
-    pub(crate) fn key_error(key: &Value, vm: &VM<'_, '_, impl ResourceTracker>) -> RunError {
+    pub(crate) fn key_error(key: &Value, vm: &VM<'_, '_>) -> RunError {
         let key_str = match key.py_str(vm) {
             Ok(s) => s.into_owned(),
             Err(_) => format!("<{}>", key.py_type(vm)),
@@ -1264,7 +1263,7 @@ impl SimpleException {
 }
 
 impl<'h> HeapRead<'h, SimpleException> {
-    pub(crate) fn py_type(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> Type {
+    pub(crate) fn py_type(&self, vm: &VM<'h, '_>) -> Type {
         Type::Exception(self.get(vm.heap).exc_type)
     }
 }
@@ -1304,11 +1303,7 @@ impl<'h> HeapRead<'h, SimpleException> {
     ///
     /// Handles the `.args` attribute by allocating a tuple containing the message.
     /// Returns `Err(AttributeError)` for all other attributes.
-    pub fn py_getattr(
-        &self,
-        attr: &EitherStr,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
-    ) -> RunResult<Option<CallResult>> {
+    pub fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, '_>) -> RunResult<Option<CallResult>> {
         // Fast path: interned strings can be matched by ID
         let is_args = attr
             .static_string()

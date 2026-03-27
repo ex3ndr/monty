@@ -6,7 +6,6 @@ use crate::{
     defer_drop_mut,
     exception_private::RunResult,
     heap::HeapData,
-    resource::ResourceTracker,
     types::{List, MontyIter, allocate_tuple, tuple::TupleVec},
     value::Value,
 };
@@ -16,7 +15,7 @@ use crate::{
 /// Returns a list of tuples, where the i-th tuple contains the i-th element
 /// from each of the argument iterables. Stops when the shortest iterable is exhausted.
 /// Note: In Python this returns an iterator, but we return a list for simplicity.
-pub fn builtin_zip(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_zip(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (positional, kwargs) = args.into_parts();
     defer_drop_mut!(positional, vm);
 

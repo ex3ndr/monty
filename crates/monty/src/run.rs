@@ -136,16 +136,16 @@ impl MontyRun {
     /// # Panics
     /// This method should not panic under normal operation. Internal assertions
     /// may panic if the VM reaches an inconsistent state (indicating a bug).
-    pub fn start<T: ResourceTracker>(
+    pub fn start(
         self,
         inputs: Vec<MontyObject>,
-        resource_tracker: T,
+        resource_tracker: impl ResourceTracker,
         mut print: PrintWriter<'_>,
-    ) -> Result<RunProgress<T>, MontyException> {
+    ) -> Result<RunProgress, MontyException> {
         let executor = self.executor;
 
         // Create heap and VM with empty globals, then populate inputs with VM alive
-        let mut heap = Heap::new(executor.namespace_size, resource_tracker);
+        let mut heap = Heap::new(executor.namespace_size, Box::new(resource_tracker));
         let globals = executor.empty_globals();
         let (converted, vm_state) = HeapReader::with(&mut heap, |heap| {
             let mut vm = VM::new(globals, heap, &executor.interns, print.reborrow());
@@ -244,7 +244,7 @@ impl Executor {
         mut print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
         let heap_capacity = self.heap_capacity.load(Ordering::Relaxed);
-        let mut heap = Heap::new(heap_capacity, resource_tracker);
+        let mut heap = Heap::new(heap_capacity, Box::new(resource_tracker));
         let globals = self.empty_globals();
 
         // Create VM first, then populate inputs with VM alive
@@ -318,7 +318,7 @@ impl Executor {
     fn run_ref_counts(&self, inputs: Vec<MontyObject>) -> Result<RefCountOutput, MontyException> {
         use std::collections::HashSet;
 
-        let mut heap = Heap::new(self.namespace_size, NoLimitTracker);
+        let mut heap = Heap::new(self.namespace_size, Box::new(NoLimitTracker));
         let globals = self.empty_globals();
 
         HeapReader::with(&mut heap, |heap| {
@@ -385,11 +385,7 @@ impl Executor {
     /// This runs with the VM alive so that `to_value` has access to the full VM context.
     /// On error partway through, the VM's `cleanup()` (via drop) will drain globals and
     /// properly decrement refcounts for any already-converted values.
-    pub(crate) fn populate_inputs(
-        &self,
-        inputs: Vec<MontyObject>,
-        vm: &mut VM<'_, '_, impl ResourceTracker>,
-    ) -> Result<(), MontyException> {
+    pub(crate) fn populate_inputs(&self, inputs: Vec<MontyObject>, vm: &mut VM<'_, '_>) -> Result<(), MontyException> {
         if inputs.len() > self.namespace_size {
             return Err(MontyException::runtime_error("too many inputs for namespace"));
         }
@@ -407,10 +403,7 @@ impl Executor {
 ///
 /// Used by non-iterative execution paths where suspendable outcomes (external calls,
 /// name lookups) are not supported and should produce errors.
-fn frame_exit_to_object(
-    frame_exit_result: RunResult<FrameExit>,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
-) -> RunResult<MontyObject> {
+fn frame_exit_to_object(frame_exit_result: RunResult<FrameExit>, vm: &mut VM<'_, '_>) -> RunResult<MontyObject> {
     match frame_exit_result? {
         FrameExit::Return(return_value) => Ok(MontyObject::new(return_value, vm)),
         FrameExit::ExternalCall {

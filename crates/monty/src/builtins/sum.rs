@@ -6,7 +6,6 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, RunResult, SimpleException},
     heap::HeapGuard,
-    resource::ResourceTracker,
     types::{MontyIter, PyTrait, Type},
     value::Value,
 };
@@ -16,7 +15,7 @@ use crate::{
 /// Sums the items of an iterable from left to right with an optional start value.
 /// The default start value is 0. String start values are explicitly rejected
 /// (use `''.join(seq)` instead for string concatenation).
-pub fn builtin_sum(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_sum(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (iterable, start) = args.get_one_two_args("sum", vm.heap)?;
     defer_drop_mut!(start, vm);
 

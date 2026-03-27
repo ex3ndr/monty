@@ -47,8 +47,7 @@ use std::borrow::Cow;
 
 use monty::{
     ExcType, ExtFunctionResult, FunctionCall, LimitedTracker, MontyException, MontyObject, MontyRepl as CoreMontyRepl,
-    MontyRun, NameLookup, NameLookupResult, NoLimitTracker, OsCall, PrintWriter, PrintWriterCallback, ResourceTracker,
-    RunProgress,
+    MontyRun, NameLookup, NameLookupResult, NoLimitTracker, OsCall, PrintWriter, PrintWriterCallback, RunProgress,
 };
 use monty_type_checking::{type_check, SourceFile};
 use napi::bindgen_prelude::*;
@@ -442,16 +441,6 @@ fn run_type_check_result(code: &str, script_name: &str, prefix_code: Option<&str
 // MontyRepl - Incremental no-replay REPL session
 // =============================================================================
 
-/// REPL state holder for napi interoperability.
-///
-/// `napi` classes cannot be generic, so this enum stores REPL sessions for both
-/// resource tracker variants.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-enum EitherRepl {
-    NoLimit(CoreMontyRepl<NoLimitTracker>),
-    Limited(CoreMontyRepl<LimitedTracker>),
-}
-
 /// Options for creating a new `MontyRepl` instance.
 ///
 /// Controls the script name shown in tracebacks and optional resource limits
@@ -471,7 +460,7 @@ pub struct MontyReplOptions {
 /// incrementally against persistent heap and namespace state.
 #[napi]
 pub struct MontyRepl {
-    repl: EitherRepl,
+    repl: CoreMontyRepl,
     script_name: String,
 }
 
@@ -490,10 +479,9 @@ impl MontyRepl {
         let script_name = options.script_name.unwrap_or_else(|| "main.py".to_string());
 
         let repl = if let Some(limits) = options.limits {
-            let tracker = LimitedTracker::new(limits.into());
-            EitherRepl::Limited(CoreMontyRepl::new(&script_name, tracker))
+            CoreMontyRepl::new(&script_name, LimitedTracker::new(limits.into()))
         } else {
-            EitherRepl::NoLimit(CoreMontyRepl::new(&script_name, NoLimitTracker))
+            CoreMontyRepl::new(&script_name, NoLimitTracker)
         };
 
         Self { repl, script_name }
@@ -513,10 +501,7 @@ impl MontyRepl {
         env: &'env Env,
         code: String,
     ) -> Result<Either<JsMontyObject<'env>, JsMontyException>> {
-        let output = match &mut self.repl {
-            EitherRepl::NoLimit(repl) => repl.feed_run(&code, vec![], PrintWriter::Stdout),
-            EitherRepl::Limited(repl) => repl.feed_run(&code, vec![], PrintWriter::Stdout),
-        };
+        let output = self.repl.feed_run(&code, vec![], PrintWriter::Stdout);
 
         match output {
             Ok(value) => Ok(Either::A(monty_to_js(&value, env)?)),
@@ -618,18 +603,17 @@ fn extract_input_values_in_order(
 }
 
 // =============================================================================
-// EitherSnapshot - Internal enum to handle generic resource tracker types
+// SnapshotState - Internal enum to handle generic resource tracker types
 // =============================================================================
 
-/// Runtime execution snapshot, holds a `FunctionCall` for either resource tracker variant
-/// since napi structs can't be generic.
+/// Execution snapshot state for a paused external function call.
 ///
-/// Used internally by `MontySnapshot` to store execution state.
-/// The `Done` variant indicates the snapshot has been consumed.
+/// Wraps a `FunctionCall` that can be resumed. The `Done` variant is a sentinel
+/// indicating the snapshot has been consumed via `resume()`.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-enum EitherSnapshot {
-    NoLimit(FunctionCall<NoLimitTracker>),
-    Limited(FunctionCall<LimitedTracker>),
+enum SnapshotState {
+    /// Active snapshot holding the paused function call.
+    Pending(Box<FunctionCall>),
     /// Sentinel indicating the snapshot has been consumed via `resume()`.
     Done,
 }
@@ -645,7 +629,7 @@ enum EitherSnapshot {
 #[napi]
 pub struct MontySnapshot {
     /// The execution state that can be resumed.
-    snapshot: EitherSnapshot,
+    snapshot: SnapshotState,
     /// Name of the script being executed.
     script_name: String,
     /// The name of the external function being called.
@@ -689,12 +673,14 @@ pub struct SnapshotLoadOptions<'env> {
 impl MontySnapshot {
     /// Returns the name of the script being executed.
     #[napi(getter)]
+    #[must_use]
     pub fn script_name(&self) -> String {
         self.script_name.clone()
     }
 
     /// Returns the name of the external function being called.
     #[napi(getter)]
+    #[must_use]
     pub fn function_name(&self) -> String {
         self.function_name.clone()
     }
@@ -755,7 +741,7 @@ impl MontySnapshot {
         };
 
         // Take the snapshot, replacing with Done
-        let snapshot = std::mem::replace(&mut self.snapshot, EitherSnapshot::Done);
+        let snapshot = std::mem::replace(&mut self.snapshot, SnapshotState::Done);
 
         // Take the print callback
         // This is necessary to move out of `&mut self` to please the borrow checker.
@@ -772,23 +758,16 @@ impl MontySnapshot {
             None => PrintWriter::Stdout,
         };
 
-        // Resume execution based on the snapshot type
+        // Resume execution based on the snapshot state
         match snapshot {
-            EitherSnapshot::NoLimit(call) => {
+            SnapshotState::Pending(call) => {
                 let progress = match call.resume(external_result, print_writer) {
                     Ok(p) => p,
                     Err(exc) => return Ok(Either4::D(JsMontyException::new(exc))),
                 };
                 Ok(progress_to_result(progress, print_callback, self.script_name.clone()))
             }
-            EitherSnapshot::Limited(call) => {
-                let progress = match call.resume(external_result, print_writer) {
-                    Ok(p) => p,
-                    Err(exc) => return Ok(Either4::D(JsMontyException::new(exc))),
-                };
-                Ok(progress_to_result(progress, print_callback, self.script_name.clone()))
-            }
-            EitherSnapshot::Done => Err(Error::from_reason("Snapshot has already been resumed")),
+            SnapshotState::Done => Err(Error::from_reason("Snapshot has already been resumed")),
         }
     }
 
@@ -800,7 +779,7 @@ impl MontySnapshot {
     /// @returns Buffer containing the serialized snapshot
     #[napi]
     pub fn dump(&self) -> Result<Buffer> {
-        if matches!(self.snapshot, EitherSnapshot::Done) {
+        if matches!(self.snapshot, SnapshotState::Done) {
             return Err(Error::from_reason("Cannot dump snapshot that has already been resumed"));
         }
 
@@ -843,6 +822,7 @@ impl MontySnapshot {
 
     /// Returns a string representation of the MontySnapshot.
     #[napi]
+    #[must_use]
     pub fn repr(&self) -> String {
         format!(
             "MontySnapshot(scriptName='{}', functionName='{}', args={:?}, kwargs={:?})",
@@ -881,37 +861,19 @@ impl MontyComplete {
 }
 
 // =============================================================================
-// EitherLookupSnapshot - Internal enum for NameLookup tracker variants
+// LookupState - Internal enum for NameLookup tracker variants
 // =============================================================================
 
-/// Runtime execution snapshot, holds a `NameLookup` for either resource tracker variant
-/// since napi structs can't be generic.
+/// Execution snapshot state for a paused name lookup.
 ///
-/// The `Done` variant indicates the snapshot has been consumed.
+/// Wraps a `NameLookup` that can be resumed. The `Done` variant is a sentinel
+/// indicating the snapshot has been consumed via `resume()`.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-enum EitherLookupSnapshot {
-    NoLimit(NameLookup<NoLimitTracker>),
-    Limited(NameLookup<LimitedTracker>),
+enum LookupState {
+    /// Active snapshot holding the paused name lookup.
+    Pending(Box<NameLookup>),
     /// Sentinel indicating the snapshot has been consumed via `resume()`.
     Done,
-}
-
-/// Trait to convert a typed `NameLookup` into `EitherLookupSnapshot`.
-trait FromLookupSnapshot<T: ResourceTracker> {
-    /// Wraps a name-lookup snapshot.
-    fn from_lookup(lookup: NameLookup<T>) -> Self;
-}
-
-impl FromLookupSnapshot<NoLimitTracker> for EitherLookupSnapshot {
-    fn from_lookup(lookup: NameLookup<NoLimitTracker>) -> Self {
-        Self::NoLimit(lookup)
-    }
-}
-
-impl FromLookupSnapshot<LimitedTracker> for EitherLookupSnapshot {
-    fn from_lookup(lookup: NameLookup<LimitedTracker>) -> Self {
-        Self::Limited(lookup)
-    }
 }
 
 // =============================================================================
@@ -926,7 +888,7 @@ impl FromLookupSnapshot<LimitedTracker> for EitherLookupSnapshot {
 #[napi]
 pub struct MontyNameLookup {
     /// The execution state that can be resumed.
-    snapshot: EitherLookupSnapshot,
+    snapshot: LookupState,
     /// Name of the script being executed.
     script_name: String,
     /// The name of the variable being looked up.
@@ -956,12 +918,14 @@ pub struct NameLookupLoadOptions<'env> {
 impl MontyNameLookup {
     /// Returns the name of the script being executed.
     #[napi(getter)]
+    #[must_use]
     pub fn script_name(&self) -> String {
         self.script_name.clone()
     }
 
     /// Returns the name of the variable being looked up.
     #[napi(getter)]
+    #[must_use]
     pub fn variable_name(&self) -> String {
         self.variable_name.clone()
     }
@@ -989,7 +953,7 @@ impl MontyNameLookup {
         };
 
         // Take the snapshot, replacing with Done
-        let snapshot = std::mem::replace(&mut self.snapshot, EitherLookupSnapshot::Done);
+        let snapshot = std::mem::replace(&mut self.snapshot, LookupState::Done);
 
         // Take the print callback
         let print_callback = std::mem::take(&mut self.print_callback);
@@ -1005,21 +969,14 @@ impl MontyNameLookup {
         };
 
         match snapshot {
-            EitherLookupSnapshot::NoLimit(lookup) => {
+            LookupState::Pending(lookup) => {
                 let progress = match lookup.resume(lookup_result, print_writer) {
                     Ok(p) => p,
                     Err(exc) => return Ok(Either4::D(JsMontyException::new(exc))),
                 };
                 Ok(progress_to_result(progress, print_callback, self.script_name.clone()))
             }
-            EitherLookupSnapshot::Limited(lookup) => {
-                let progress = match lookup.resume(lookup_result, print_writer) {
-                    Ok(p) => p,
-                    Err(exc) => return Ok(Either4::D(JsMontyException::new(exc))),
-                };
-                Ok(progress_to_result(progress, print_callback, self.script_name.clone()))
-            }
-            EitherLookupSnapshot::Done => Err(Error::from_reason("Name lookup has already been resumed")),
+            LookupState::Done => Err(Error::from_reason("Name lookup has already been resumed")),
         }
     }
 
@@ -1030,7 +987,7 @@ impl MontyNameLookup {
     /// @returns Buffer containing the serialized name lookup snapshot
     #[napi]
     pub fn dump(&self) -> Result<Buffer> {
-        if matches!(self.snapshot, EitherLookupSnapshot::Done) {
+        if matches!(self.snapshot, LookupState::Done) {
             return Err(Error::from_reason(
                 "Cannot dump name lookup that has already been resumed",
             ));
@@ -1071,6 +1028,7 @@ impl MontyNameLookup {
 
     /// Returns a string representation of the MontyNameLookup.
     #[napi]
+    #[must_use]
     pub fn repr(&self) -> String {
         format!(
             "MontyNameLookup(scriptName='{}', variableName='{}')",
@@ -1131,16 +1089,11 @@ impl PrintWriterCallback for CallbackStringPrint<'_> {
 /// For progress types that are not yet supported in the JS bindings (`ResolveFutures`, `OsCall`),
 /// returns a `JsMontyException` with `NotImplementedError` instead of panicking, matching
 /// the Python bindings behavior.
-fn progress_to_result<T>(
-    progress: RunProgress<T>,
+fn progress_to_result(
+    progress: RunProgress,
     print_callback: Option<JsPrintCallbackRef>,
     script_name: String,
-) -> Either4<MontySnapshot, MontyNameLookup, MontyComplete, JsMontyException>
-where
-    T: ResourceTracker + serde::Serialize + serde::de::DeserializeOwned,
-    EitherSnapshot: FromSnapshot<T>,
-    EitherLookupSnapshot: FromLookupSnapshot<T>,
-{
+) -> Either4<MontySnapshot, MontyNameLookup, MontyComplete, JsMontyException> {
     match progress {
         RunProgress::Complete(result) => Either4::C(MontyComplete { output_value: result }),
         RunProgress::FunctionCall(call) => {
@@ -1148,7 +1101,7 @@ where
             let args = call.args.clone();
             let kwargs = call.kwargs.clone();
             Either4::A(MontySnapshot {
-                snapshot: EitherSnapshot::from_snapshot(call),
+                snapshot: SnapshotState::Pending(Box::new(call)),
                 script_name,
                 function_name,
                 args,
@@ -1159,7 +1112,7 @@ where
         RunProgress::NameLookup(lookup) => {
             let variable_name = lookup.name.clone();
             Either4::B(MontyNameLookup {
-                snapshot: EitherLookupSnapshot::from_lookup(lookup),
+                snapshot: LookupState::Pending(Box::new(lookup)),
                 script_name,
                 variable_name,
                 print_callback,
@@ -1173,24 +1126,6 @@ where
             ExcType::NotImplementedError,
             Some(format!("OS function '{function}' not implemented")),
         ))),
-    }
-}
-
-/// Trait to convert a typed `FunctionCall` into `EitherSnapshot`.
-trait FromSnapshot<T: ResourceTracker> {
-    /// Wraps a function-call snapshot.
-    fn from_snapshot(call: FunctionCall<T>) -> Self;
-}
-
-impl FromSnapshot<NoLimitTracker> for EitherSnapshot {
-    fn from_snapshot(call: FunctionCall<NoLimitTracker>) -> Self {
-        Self::NoLimit(call)
-    }
-}
-
-impl FromSnapshot<LimitedTracker> for EitherSnapshot {
-    fn from_snapshot(call: FunctionCall<LimitedTracker>) -> Self {
-        Self::Limited(call)
     }
 }
 
@@ -1216,21 +1151,21 @@ struct SerializedMonty {
 /// Serialization wrapper for `MontyRepl` using borrowed references.
 #[derive(serde::Serialize)]
 struct SerializedRepl<'a> {
-    repl: &'a EitherRepl,
+    repl: &'a CoreMontyRepl,
     script_name: &'a str,
 }
 
 /// Owned version of `SerializedRepl` for deserialization.
 #[derive(serde::Deserialize)]
 struct SerializedReplOwned {
-    repl: EitherRepl,
+    repl: CoreMontyRepl,
     script_name: String,
 }
 
 /// Serialization wrapper for `MontySnapshot` using borrowed references.
 #[derive(serde::Serialize)]
 struct SerializedSnapshot<'a> {
-    snapshot: &'a EitherSnapshot,
+    snapshot: &'a SnapshotState,
     script_name: &'a str,
     function_name: &'a str,
     args: &'a [MontyObject],
@@ -1240,7 +1175,7 @@ struct SerializedSnapshot<'a> {
 /// Owned version of `SerializedSnapshot` for deserialization.
 #[derive(serde::Deserialize)]
 struct SerializedSnapshotOwned {
-    snapshot: EitherSnapshot,
+    snapshot: SnapshotState,
     script_name: String,
     function_name: String,
     args: Vec<MontyObject>,
@@ -1250,7 +1185,7 @@ struct SerializedSnapshotOwned {
 /// Serialization wrapper for `MontyNameLookup` using borrowed references.
 #[derive(serde::Serialize)]
 struct SerializedNameLookup<'a> {
-    snapshot: &'a EitherLookupSnapshot,
+    snapshot: &'a LookupState,
     script_name: &'a str,
     variable_name: &'a str,
 }
@@ -1258,7 +1193,7 @@ struct SerializedNameLookup<'a> {
 /// Owned version of `SerializedNameLookup` for deserialization.
 #[derive(serde::Deserialize)]
 struct SerializedNameLookupOwned {
-    snapshot: EitherLookupSnapshot,
+    snapshot: LookupState,
     script_name: String,
     variable_name: String,
 }

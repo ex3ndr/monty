@@ -9,7 +9,6 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, RunResult},
     heap::HeapData,
-    resource::ResourceTracker,
     types::{PyTrait, Str},
     value::Value,
 };
@@ -18,7 +17,7 @@ use crate::{
 ///
 /// Converts an integer to a binary string prefixed with '0b'.
 /// Supports both i64 and BigInt integers.
-pub fn builtin_bin(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_bin(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let value = args.get_one_arg("bin", vm.heap)?;
     defer_drop!(value, vm);
 

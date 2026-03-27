@@ -16,7 +16,7 @@ use crate::{
     heap::{Heap, HeapData, HeapId},
     intern::StaticStrings,
     modules::ModuleFunctions,
-    resource::{ResourceError, ResourceTracker},
+    resource::ResourceError,
     types::Module,
     value::Value,
 };
@@ -39,7 +39,7 @@ pub(crate) enum AsyncioFunctions {
 ///
 /// # Panics
 /// Panics if the required strings have not been pre-interned during prepare phase.
-pub fn create_module(vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<HeapId, ResourceError> {
+pub fn create_module(vm: &mut VM<'_, '_>) -> Result<HeapId, ResourceError> {
     let mut module = Module::new(StaticStrings::Asyncio);
 
     module.set_attr(
@@ -55,11 +55,7 @@ pub fn create_module(vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<HeapId
 
     vm.heap.allocate(HeapData::Module(module))
 }
-pub(super) fn call(
-    heap: &mut Heap<impl ResourceTracker>,
-    functions: AsyncioFunctions,
-    args: ArgValues,
-) -> RunResult<CallResult> {
+pub(super) fn call(heap: &mut Heap, functions: AsyncioFunctions, args: ArgValues) -> RunResult<CallResult> {
     match functions {
         AsyncioFunctions::Gather => gather(heap, args).map(CallResult::Value),
         AsyncioFunctions::Run => run(heap, args),
@@ -73,7 +69,7 @@ pub(super) fn call(
 ///
 /// Returns `CallResult::AwaitValue` so the VM executes `exec_get_awaitable` on
 /// the value, which handles validation that it's actually a coroutine/awaitable.
-fn run(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> RunResult<CallResult> {
+fn run(heap: &mut Heap, args: ArgValues) -> RunResult<CallResult> {
     let coroutine = args.get_one_arg("asyncio.run", heap)?;
     Ok(CallResult::AwaitValue(coroutine))
 }
@@ -98,7 +94,7 @@ fn run(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> RunResult<Call
 ///
 /// # Errors
 /// Returns `TypeError` if any argument is not awaitable.
-pub(crate) fn gather(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+pub(crate) fn gather(heap: &mut Heap, args: ArgValues) -> RunResult<Value> {
     let (pos_args, kwargs) = args.into_parts();
     defer_drop_mut!(pos_args, heap);
 

@@ -17,7 +17,7 @@ use crate::{
     heap::{DropWithHeap, Heap, HeapData, HeapId, HeapItem, HeapRead},
     intern::{Interns, StaticStrings},
     os::OsFunction,
-    resource::{ResourceError, ResourceTracker},
+    resource::ResourceError,
     types::{PyTrait, Str, Type, allocate_tuple},
     value::{EitherStr, Value},
 };
@@ -261,7 +261,7 @@ impl Path {
     /// - `Path('a')` returns `Path('a')`
     /// - `Path('a', 'b', 'c')` returns `Path('a/b/c')`
     /// - If an absolute path appears, it replaces everything before it.
-    pub fn init(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    pub fn init(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
         let pos_args = args.into_pos_only("Path", vm.heap)?;
         defer_drop!(pos_args, vm);
 
@@ -284,7 +284,7 @@ impl Path {
 }
 
 /// Extracts a string from a Value for use as a path.
-fn extract_path_string<'a>(val: &Value, vm: &'a VM<'_, '_, impl ResourceTracker>) -> RunResult<&'a str> {
+fn extract_path_string<'a>(val: &Value, vm: &'a VM<'_, '_>) -> RunResult<&'a str> {
     match val {
         Value::InternString(string_id) => Ok(vm.interns.get_str(*string_id)),
         Value::Ref(heap_id) => match vm.heap.get(*heap_id) {
@@ -302,7 +302,7 @@ fn extract_path_string<'a>(val: &Value, vm: &'a VM<'_, '_, impl ResourceTracker>
     }
 }
 
-fn fold_joinpath(mut path: Path, parts: &[Value], vm: &VM<'_, '_, impl ResourceTracker>) -> RunResult<Path> {
+fn fold_joinpath(mut path: Path, parts: &[Value], vm: &VM<'_, '_>) -> RunResult<Path> {
     for part in parts {
         path = Path::new(path.joinpath(extract_path_string(part, vm)?));
     }
@@ -312,12 +312,7 @@ fn fold_joinpath(mut path: Path, parts: &[Value], vm: &VM<'_, '_, impl ResourceT
 /// Handles the `/` operator for Path objects (path concatenation).
 ///
 /// In Python, `Path('/usr') / 'bin'` produces `Path('/usr/bin')`.
-pub(crate) fn path_div(
-    path_id: HeapId,
-    other: &Value,
-    heap: &Heap<impl ResourceTracker>,
-    interns: &Interns,
-) -> RunResult<Option<Value>> {
+pub(crate) fn path_div(path_id: HeapId, other: &Value, heap: &Heap, interns: &Interns) -> RunResult<Option<Value>> {
     // Extract the right-hand side as a string
     let other_str = match other {
         Value::InternString(string_id) => interns.get_str(*string_id).to_owned(),
@@ -389,11 +384,7 @@ impl Path {
     /// `stem`, `suffix`, `suffixes`, `parts`), or `Ok(None)` if the variant doesn't
     /// correspond to a Path attribute. Used by `py_getattr` to share logic between
     /// the interned fast path and the heap string slow path.
-    pub(crate) fn getattr_by_static(
-        &self,
-        ss: StaticStrings,
-        heap: &Heap<impl ResourceTracker>,
-    ) -> RunResult<Option<Value>> {
+    pub(crate) fn getattr_by_static(&self, ss: StaticStrings, heap: &Heap) -> RunResult<Option<Value>> {
         let v = match ss {
             StaticStrings::Name => {
                 let name = self.name();
@@ -444,30 +435,25 @@ impl Path {
 }
 
 impl<'h> PyTrait<'h> for HeapRead<'h, Path> {
-    fn py_type(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Type {
+    fn py_type(&self, _vm: &VM<'h, '_>) -> Type {
         Type::Path
     }
 
-    fn py_len(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Option<usize> {
+    fn py_len(&self, _vm: &VM<'h, '_>) -> Option<usize> {
         // Paths don't have a length in Python
         None
     }
 
-    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_>) -> Result<bool, ResourceError> {
         Ok(self.get(vm.heap).path == other.get(vm.heap).path)
     }
 
-    fn py_bool(&self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> bool {
+    fn py_bool(&self, _vm: &mut VM<'h, '_>) -> bool {
         // Paths are always truthy (even empty paths)
         true
     }
 
-    fn py_repr_fmt(
-        &self,
-        f: &mut impl Write,
-        vm: &VM<'h, '_, impl ResourceTracker>,
-        _heap_ids: &mut AHashSet<HeapId>,
-    ) -> RunResult<()> {
+    fn py_repr_fmt(&self, f: &mut impl Write, vm: &VM<'h, '_>, _heap_ids: &mut AHashSet<HeapId>) -> RunResult<()> {
         // Format like: PosixPath('/usr/bin')
         Ok(write!(f, "PosixPath('{}')", self.get(vm.heap).path)?)
     }
@@ -481,7 +467,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Path> {
     fn py_call_attr(
         &mut self,
         self_id: HeapId,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
+        vm: &mut VM<'h, '_>,
         attr: &EitherStr,
         args: ArgValues,
     ) -> RunResult<CallResult> {
@@ -554,7 +540,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Path> {
         value.map(CallResult::Value)
     }
 
-    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<CallResult>> {
+    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, '_>) -> RunResult<Option<CallResult>> {
         // Fast path: interned strings can be matched by ID without string comparison
         if let Some(ss) = attr.static_string() {
             if let Some(v) = self.get(vm.heap).getattr_by_static(ss, vm.heap)? {

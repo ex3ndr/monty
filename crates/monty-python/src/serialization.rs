@@ -12,8 +12,8 @@
 use std::sync::{Mutex, PoisonError};
 
 use ::monty::{
-    FunctionCall, LimitedTracker, MontyObject, NameLookup, NoLimitTracker, OsCall, ReplFunctionCall, ReplNameLookup,
-    ReplOsCall, ReplResolveFutures, ResolveFutures,
+    FunctionCall, MontyObject, NameLookup, OsCall, ReplFunctionCall, ReplNameLookup, ReplOsCall, ReplResolveFutures,
+    ResolveFutures,
 };
 use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
@@ -26,7 +26,6 @@ use sha2::{Digest, Sha256};
 use crate::{
     convert::{monty_to_py, py_to_monty},
     dataclass::DcRegistry,
-    limits::PySignalTracker,
     monty_cls::{
         EitherFunctionSnapshot, EitherFutureSnapshot, EitherLookupSnapshot, PyFunctionSnapshot, PyFutureSnapshot,
         PyNameLookupSnapshot,
@@ -169,28 +168,20 @@ pub(crate) enum SerializedReplSnapshot {
 /// `load_repl_snapshot`. Non-REPL variants pass through directly.
 #[derive(Serialize, Deserialize)]
 pub(crate) enum SerdeFunctionSnapshot {
-    NoLimitFn(FunctionCall<PySignalTracker<NoLimitTracker>>),
-    NoLimitOs(OsCall<PySignalTracker<NoLimitTracker>>),
-    LimitedFn(FunctionCall<PySignalTracker<LimitedTracker>>),
-    LimitedOs(OsCall<PySignalTracker<LimitedTracker>>),
-    ReplNoLimitFn(ReplFunctionCall<PySignalTracker<NoLimitTracker>>),
-    ReplNoLimitOs(ReplOsCall<PySignalTracker<NoLimitTracker>>),
-    ReplLimitedFn(ReplFunctionCall<PySignalTracker<LimitedTracker>>),
-    ReplLimitedOs(ReplOsCall<PySignalTracker<LimitedTracker>>),
+    Fn(FunctionCall),
+    Os(OsCall),
+    ReplFn(ReplFunctionCall),
+    ReplOs(ReplOsCall),
     Done,
 }
 
 /// Borrowing version of `SerdeFunctionSnapshot` for zero-copy serialization.
 #[derive(Serialize)]
 enum SerdeFunctionSnapshotRef<'a> {
-    NoLimitFn(&'a FunctionCall<PySignalTracker<NoLimitTracker>>),
-    NoLimitOs(&'a OsCall<PySignalTracker<NoLimitTracker>>),
-    LimitedFn(&'a FunctionCall<PySignalTracker<LimitedTracker>>),
-    LimitedOs(&'a OsCall<PySignalTracker<LimitedTracker>>),
-    ReplNoLimitFn(&'a ReplFunctionCall<PySignalTracker<NoLimitTracker>>),
-    ReplNoLimitOs(&'a ReplOsCall<PySignalTracker<NoLimitTracker>>),
-    ReplLimitedFn(&'a ReplFunctionCall<PySignalTracker<LimitedTracker>>),
-    ReplLimitedOs(&'a ReplOsCall<PySignalTracker<LimitedTracker>>),
+    Fn(&'a FunctionCall),
+    Os(&'a OsCall),
+    ReplFn(&'a ReplFunctionCall),
+    ReplOs(&'a ReplOsCall),
     Done,
 }
 
@@ -201,31 +192,22 @@ impl SerdeFunctionSnapshot {
     /// for REPL snapshots instead.
     fn into_either(self) -> PyResult<EitherFunctionSnapshot> {
         match self {
-            Self::NoLimitFn(c) => Ok(EitherFunctionSnapshot::NoLimitFn(c)),
-            Self::NoLimitOs(c) => Ok(EitherFunctionSnapshot::NoLimitOs(c)),
-            Self::LimitedFn(c) => Ok(EitherFunctionSnapshot::LimitedFn(c)),
-            Self::LimitedOs(c) => Ok(EitherFunctionSnapshot::LimitedOs(c)),
-            Self::ReplNoLimitFn(_) | Self::ReplNoLimitOs(_) | Self::ReplLimitedFn(_) | Self::ReplLimitedOs(_) => Err(
-                PyValueError::new_err("Cannot load a REPL snapshot with load_snapshot, use load_repl_snapshot instead"),
-            ),
+            Self::Fn(c) => Ok(EitherFunctionSnapshot::Fn(c)),
+            Self::Os(c) => Ok(EitherFunctionSnapshot::Os(c)),
+            Self::ReplFn(_) | Self::ReplOs(_) => Err(PyValueError::new_err(
+                "Cannot load a REPL snapshot with load_snapshot, use load_repl_snapshot instead",
+            )),
             Self::Done => Ok(EitherFunctionSnapshot::Done),
         }
     }
 
     /// Converts into `EitherFunctionSnapshot` with a REPL owner attached.
-    ///
-    /// REPL variants are wired to the given `Py<PyMontyRepl>`.
-    /// Non-REPL variants pass through unchanged.
     fn into_either_with_repl(self, owner: Py<PyMontyRepl>) -> EitherFunctionSnapshot {
         match self {
-            Self::NoLimitFn(c) => EitherFunctionSnapshot::NoLimitFn(c),
-            Self::NoLimitOs(c) => EitherFunctionSnapshot::NoLimitOs(c),
-            Self::LimitedFn(c) => EitherFunctionSnapshot::LimitedFn(c),
-            Self::LimitedOs(c) => EitherFunctionSnapshot::LimitedOs(c),
-            Self::ReplNoLimitFn(c) => EitherFunctionSnapshot::ReplNoLimitFn(c, owner),
-            Self::ReplNoLimitOs(c) => EitherFunctionSnapshot::ReplNoLimitOs(c, owner),
-            Self::ReplLimitedFn(c) => EitherFunctionSnapshot::ReplLimitedFn(c, owner),
-            Self::ReplLimitedOs(c) => EitherFunctionSnapshot::ReplLimitedOs(c, owner),
+            Self::Fn(c) => EitherFunctionSnapshot::Fn(c),
+            Self::Os(c) => EitherFunctionSnapshot::Os(c),
+            Self::ReplFn(c) => EitherFunctionSnapshot::ReplFn(c, owner),
+            Self::ReplOs(c) => EitherFunctionSnapshot::ReplOs(c, owner),
             Self::Done => EitherFunctionSnapshot::Done,
         }
     }
@@ -235,14 +217,10 @@ impl EitherFunctionSnapshot {
     /// Borrows self as a `SerdeFunctionSnapshotRef` for serialization.
     fn as_serde_ref(&self) -> SerdeFunctionSnapshotRef<'_> {
         match self {
-            Self::NoLimitFn(c) => SerdeFunctionSnapshotRef::NoLimitFn(c),
-            Self::NoLimitOs(c) => SerdeFunctionSnapshotRef::NoLimitOs(c),
-            Self::LimitedFn(c) => SerdeFunctionSnapshotRef::LimitedFn(c),
-            Self::LimitedOs(c) => SerdeFunctionSnapshotRef::LimitedOs(c),
-            Self::ReplNoLimitFn(c, _) => SerdeFunctionSnapshotRef::ReplNoLimitFn(c),
-            Self::ReplNoLimitOs(c, _) => SerdeFunctionSnapshotRef::ReplNoLimitOs(c),
-            Self::ReplLimitedFn(c, _) => SerdeFunctionSnapshotRef::ReplLimitedFn(c),
-            Self::ReplLimitedOs(c, _) => SerdeFunctionSnapshotRef::ReplLimitedOs(c),
+            Self::Fn(c) => SerdeFunctionSnapshotRef::Fn(c),
+            Self::Os(c) => SerdeFunctionSnapshotRef::Os(c),
+            Self::ReplFn(c, _) => SerdeFunctionSnapshotRef::ReplFn(c),
+            Self::ReplOs(c, _) => SerdeFunctionSnapshotRef::ReplOs(c),
             Self::Done => SerdeFunctionSnapshotRef::Done,
         }
     }
@@ -250,21 +228,21 @@ impl EitherFunctionSnapshot {
 
 /// Wire-format representation of `EitherLookupSnapshot` without `Py<PyMontyRepl>`.
 #[derive(Serialize, Deserialize)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "variants are inherently large due to Monty snapshot data"
+)]
 pub(crate) enum SerdeLookupSnapshot {
-    NoLimit(NameLookup<PySignalTracker<NoLimitTracker>>),
-    Limited(NameLookup<PySignalTracker<LimitedTracker>>),
-    ReplNoLimit(ReplNameLookup<PySignalTracker<NoLimitTracker>>),
-    ReplLimited(ReplNameLookup<PySignalTracker<LimitedTracker>>),
+    Lookup(NameLookup),
+    ReplLookup(ReplNameLookup),
     Done,
 }
 
 /// Borrowing version of `SerdeLookupSnapshot` for zero-copy serialization.
 #[derive(Serialize)]
 enum SerdeLookupSnapshotRef<'a> {
-    NoLimit(&'a NameLookup<PySignalTracker<NoLimitTracker>>),
-    Limited(&'a NameLookup<PySignalTracker<LimitedTracker>>),
-    ReplNoLimit(&'a ReplNameLookup<PySignalTracker<NoLimitTracker>>),
-    ReplLimited(&'a ReplNameLookup<PySignalTracker<LimitedTracker>>),
+    Lookup(&'a NameLookup),
+    ReplLookup(&'a ReplNameLookup),
     Done,
 }
 
@@ -272,9 +250,8 @@ impl SerdeLookupSnapshot {
     /// Converts into `EitherLookupSnapshot` for the non-REPL path.
     fn into_either(self) -> PyResult<EitherLookupSnapshot> {
         match self {
-            Self::NoLimit(l) => Ok(EitherLookupSnapshot::NoLimit(l)),
-            Self::Limited(l) => Ok(EitherLookupSnapshot::Limited(l)),
-            Self::ReplNoLimit(_) | Self::ReplLimited(_) => Err(PyValueError::new_err(
+            Self::Lookup(l) => Ok(EitherLookupSnapshot::Lookup(l)),
+            Self::ReplLookup(_) => Err(PyValueError::new_err(
                 "Cannot load a REPL snapshot with load_snapshot, use load_repl_snapshot instead",
             )),
             Self::Done => Ok(EitherLookupSnapshot::Done),
@@ -284,10 +261,8 @@ impl SerdeLookupSnapshot {
     /// Converts into `EitherLookupSnapshot` with a REPL owner attached.
     fn into_either_with_repl(self, owner: Py<PyMontyRepl>) -> EitherLookupSnapshot {
         match self {
-            Self::NoLimit(l) => EitherLookupSnapshot::NoLimit(l),
-            Self::Limited(l) => EitherLookupSnapshot::Limited(l),
-            Self::ReplNoLimit(l) => EitherLookupSnapshot::ReplNoLimit(l, owner),
-            Self::ReplLimited(l) => EitherLookupSnapshot::ReplLimited(l, owner),
+            Self::Lookup(l) => EitherLookupSnapshot::Lookup(l),
+            Self::ReplLookup(l) => EitherLookupSnapshot::ReplLookup(l, owner),
             Self::Done => EitherLookupSnapshot::Done,
         }
     }
@@ -297,32 +272,30 @@ impl EitherLookupSnapshot {
     /// Borrows self as a `SerdeLookupSnapshotRef` for serialization.
     fn as_serde_ref(&self) -> SerdeLookupSnapshotRef<'_> {
         match self {
-            Self::NoLimit(l) => SerdeLookupSnapshotRef::NoLimit(l),
-            Self::Limited(l) => SerdeLookupSnapshotRef::Limited(l),
-            Self::ReplNoLimit(l, _) => SerdeLookupSnapshotRef::ReplNoLimit(l),
-            Self::ReplLimited(l, _) => SerdeLookupSnapshotRef::ReplLimited(l),
+            Self::Lookup(l) => SerdeLookupSnapshotRef::Lookup(l),
+            Self::ReplLookup(l, _) => SerdeLookupSnapshotRef::ReplLookup(l),
             Self::Done => SerdeLookupSnapshotRef::Done,
         }
     }
 }
 
 /// Wire-format representation of `EitherFutureSnapshot` without `Py<PyMontyRepl>`.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "variants are inherently large due to Monty snapshot data"
+)]
 #[derive(Serialize, Deserialize)]
 pub(crate) enum SerdeFutureSnapshot {
-    NoLimit(ResolveFutures<PySignalTracker<NoLimitTracker>>),
-    Limited(ResolveFutures<PySignalTracker<LimitedTracker>>),
-    ReplNoLimit(ReplResolveFutures<PySignalTracker<NoLimitTracker>>),
-    ReplLimited(ReplResolveFutures<PySignalTracker<LimitedTracker>>),
+    Run(ResolveFutures),
+    Repl(ReplResolveFutures),
     Done,
 }
 
 /// Borrowing version of `SerdeFutureSnapshot` for zero-copy serialization.
 #[derive(Serialize)]
 enum SerdeFutureSnapshotRef<'a> {
-    NoLimit(&'a ResolveFutures<PySignalTracker<NoLimitTracker>>),
-    Limited(&'a ResolveFutures<PySignalTracker<LimitedTracker>>),
-    ReplNoLimit(&'a ReplResolveFutures<PySignalTracker<NoLimitTracker>>),
-    ReplLimited(&'a ReplResolveFutures<PySignalTracker<LimitedTracker>>),
+    Run(&'a ResolveFutures),
+    Repl(&'a ReplResolveFutures),
     Done,
 }
 
@@ -330,9 +303,8 @@ impl SerdeFutureSnapshot {
     /// Converts into `EitherFutureSnapshot` for the non-REPL path.
     fn into_either(self) -> PyResult<EitherFutureSnapshot> {
         match self {
-            Self::NoLimit(s) => Ok(EitherFutureSnapshot::NoLimit(s)),
-            Self::Limited(s) => Ok(EitherFutureSnapshot::Limited(s)),
-            Self::ReplNoLimit(_) | Self::ReplLimited(_) => Err(PyValueError::new_err(
+            Self::Run(s) => Ok(EitherFutureSnapshot::Run(s)),
+            Self::Repl(_) => Err(PyValueError::new_err(
                 "Cannot load a REPL snapshot with load_snapshot, use load_repl_snapshot instead",
             )),
             Self::Done => Ok(EitherFutureSnapshot::Done),
@@ -342,10 +314,8 @@ impl SerdeFutureSnapshot {
     /// Converts into `EitherFutureSnapshot` with a REPL owner attached.
     fn into_either_with_repl(self, owner: Py<PyMontyRepl>) -> EitherFutureSnapshot {
         match self {
-            Self::NoLimit(s) => EitherFutureSnapshot::NoLimit(s),
-            Self::Limited(s) => EitherFutureSnapshot::Limited(s),
-            Self::ReplNoLimit(s) => EitherFutureSnapshot::ReplNoLimit(s, owner),
-            Self::ReplLimited(s) => EitherFutureSnapshot::ReplLimited(s, owner),
+            Self::Run(s) => EitherFutureSnapshot::Run(s),
+            Self::Repl(s) => EitherFutureSnapshot::Repl(s, owner),
             Self::Done => EitherFutureSnapshot::Done,
         }
     }
@@ -355,10 +325,8 @@ impl EitherFutureSnapshot {
     /// Borrows self as a `SerdeFutureSnapshotRef` for serialization.
     fn as_serde_ref(&self) -> SerdeFutureSnapshotRef<'_> {
         match self {
-            Self::NoLimit(s) => SerdeFutureSnapshotRef::NoLimit(s),
-            Self::Limited(s) => SerdeFutureSnapshotRef::Limited(s),
-            Self::ReplNoLimit(s, _) => SerdeFutureSnapshotRef::ReplNoLimit(s),
-            Self::ReplLimited(s, _) => SerdeFutureSnapshotRef::ReplLimited(s),
+            Self::Run(s) => SerdeFutureSnapshotRef::Run(s),
+            Self::Repl(s, _) => SerdeFutureSnapshotRef::Repl(s),
             Self::Done => SerdeFutureSnapshotRef::Done,
         }
     }
@@ -739,23 +707,20 @@ fn monty_pairs_to_py_dict(
 impl EitherFunctionSnapshot {
     /// Returns `true` if this snapshot is from a REPL `feed_start()` call.
     pub(crate) fn is_repl(&self) -> bool {
-        matches!(
-            self,
-            Self::ReplNoLimitFn(..) | Self::ReplNoLimitOs(..) | Self::ReplLimitedFn(..) | Self::ReplLimitedOs(..)
-        )
+        matches!(self, Self::ReplFn(..) | Self::ReplOs(..))
     }
 }
 
 impl EitherLookupSnapshot {
     /// Returns `true` if this snapshot is from a REPL `feed_start()` call.
     pub(crate) fn is_repl(&self) -> bool {
-        matches!(self, Self::ReplNoLimit(..) | Self::ReplLimited(..))
+        matches!(self, Self::ReplLookup(..))
     }
 }
 
 impl EitherFutureSnapshot {
     /// Returns `true` if this snapshot is from a REPL `feed_start()` call.
     pub(crate) fn is_repl(&self) -> bool {
-        matches!(self, Self::ReplNoLimit(..) | Self::ReplLimited(..))
+        matches!(self, Self::Repl(..))
     }
 }

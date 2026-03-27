@@ -7,12 +7,11 @@ use crate::{
     exception_private::{ExcType, ExceptionRaise, RawStackFrame, RunError, SimpleException},
     heap::{HeapData, HeapGuard},
     intern::{StaticStrings, StringId},
-    resource::ResourceTracker,
     types::{PyTrait, Type},
     value::Value,
 };
 
-impl<T: ResourceTracker> VM<'_, '_, T> {
+impl VM<'_, '_> {
     /// Returns the current frame's name for traceback generation.
     ///
     /// Returns the function name for user-defined functions, or `<module>` for

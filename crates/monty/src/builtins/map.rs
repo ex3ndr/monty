@@ -6,7 +6,6 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, RunResult, SimpleException},
     heap::{DropWithHeap, HeapData},
-    resource::ResourceTracker,
     types::{List, MontyIter},
     value::Value,
 };
@@ -25,7 +24,7 @@ use crate::{
 /// map(pow, [2, 3], [3, 2])          # [8, 9]
 /// map(str, [1, 2, 3])               # ['1', '2', '3']
 /// ```
-pub fn builtin_map(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_map(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (positional, kwargs) = args.into_parts();
     defer_drop_mut!(positional, vm);
 

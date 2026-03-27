@@ -20,7 +20,6 @@ use crate::{
     exception_private::{ExcType, RunResult},
     heap::{ContainsHeap, DropWithHeap, Heap, HeapData, HeapGuard, HeapId, HeapItem, HeapRead, HeapReadOutput},
     intern::{BytesId, Interns},
-    resource::ResourceTracker,
     types::{PyTrait, Range, dict_view::DictView, str::allocate_char},
     value::Value,
 };
@@ -47,7 +46,7 @@ impl MontyIter {
     /// - `iter(iterable)` - Returns an iterator for the iterable. If the argument is
     ///   already an iterator, returns the same object.
     /// - `iter(callable, sentinel)` - Not yet supported.
-    pub fn init(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    pub fn init(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
         let (iterable, sentinel) = args.get_one_two_args("iter", vm.heap)?;
 
         if let Some(s) = sentinel {
@@ -77,7 +76,7 @@ impl MontyIter {
     /// Returns an error if the value is not iterable.
     /// For strings, copies the string content for byte-offset based iteration.
     /// For ranges, the data is copied so the heap reference is dropped immediately.
-    pub fn new(mut value: Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Self> {
+    pub fn new(mut value: Value, vm: &mut VM<'_, '_>) -> RunResult<Self> {
         if let Some(iter_value) = IterValue::new(&value, vm) {
             // For Range, we copy next/step/len into ForIterValue::Range, so we don't need
             // to keep the heap object alive during iteration. Drop it immediately to avoid
@@ -130,7 +129,7 @@ impl MontyIter {
     /// Returns `Ok(None)` when the iterator is exhausted.
     /// Returns `Err` if allocation fails (for string character iteration) or if
     /// a dict/set changes size during iteration (RuntimeError).
-    pub fn for_next(&mut self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Option<Value>> {
+    pub fn for_next(&mut self, vm: &mut VM<'_, '_>) -> RunResult<Option<Value>> {
         // Check timeout on every iteration step. For NoLimitTracker this is
         // inlined as a no-op. For LimitTracker it ensures that Rust-side loops
         // (sum, sorted, min, max, etc.) cannot bypass the VM's per-instruction
@@ -202,7 +201,7 @@ impl MontyIter {
     /// For immutable types (Range, Tuple, Str, Bytes, FrozenSet), returns the exact remaining count.
     /// For List, returns current length minus index (may change if list is mutated).
     /// For Dict and Set, returns the captured length minus index (used for size-change detection).
-    pub fn size_hint(&self, heap: &Heap<impl ResourceTracker>) -> usize {
+    pub fn size_hint(&self, heap: &Heap) -> usize {
         let len = match &self.iter_value {
             IterValue::Range { len, .. } | IterValue::IterStr { len, .. } | IterValue::InternBytes { len, .. } => *len,
             IterValue::HeapRef { heap_id, len, .. } => {
@@ -224,16 +223,16 @@ impl MontyIter {
     /// and similar constructors that need to materialize all items.
     ///
     /// Pre-allocates capacity based on `size_hint()` for better performance.
-    pub fn collect<T: FromIterator<Value>>(self, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<T> {
+    pub fn collect<T: FromIterator<Value>>(self, vm: &mut VM<'_, '_>) -> RunResult<T> {
         let mut guard = HeapGuard::new(self, vm);
         let (this, vm) = guard.as_parts_mut();
         HeapedMontyIter(this, vm).collect()
     }
 }
 
-struct HeapedMontyIter<'this, 'a, 'p, T: ResourceTracker>(&'this mut MontyIter, &'this mut VM<'a, 'p, T>);
+struct HeapedMontyIter<'this, 'a, 'p>(&'this mut MontyIter, &'this mut VM<'a, 'p>);
 
-impl<T: ResourceTracker> Iterator for HeapedMontyIter<'_, '_, '_, T> {
+impl Iterator for HeapedMontyIter<'_, '_, '_> {
     type Item = RunResult<Value>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -251,7 +250,7 @@ impl<'h> HeapRead<'h, MontyIter> {
     ///
     /// Returns `Ok(None)` when the iterator is exhausted.
     /// Returns `Err` for dict/set size changes or allocation failures.
-    pub(crate) fn advance(&mut self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<Value>> {
+    pub(crate) fn advance(&mut self, vm: &mut VM<'h, '_>) -> RunResult<Option<Value>> {
         let this = self.get_mut(vm.heap);
         match &mut this.iter_value {
             IterValue::Range { next, step, len } => {
@@ -324,7 +323,7 @@ impl<'h> HeapRead<'h, MontyIter> {
 /// Returns `Ok(None)` if the index is out of bounds (for lists that shrunk during iteration).
 /// Returns `Err` if a dict/set changed size during iteration (RuntimeError).
 fn get_heap_item(
-    vm: &VM<'_, '_, impl ResourceTracker>,
+    vm: &VM<'_, '_>,
     heap_id: HeapId,
     index: usize,
     expected_len: Option<usize>,
@@ -427,11 +426,7 @@ fn get_heap_item(
 ///
 /// # Errors
 /// Returns `StopIteration` if exhausted with no default, or propagates errors from iteration.
-pub fn iterator_next(
-    iter_value: &Value,
-    default: Option<Value>,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
-) -> RunResult<Value> {
+pub fn iterator_next(iter_value: &Value, default: Option<Value>, vm: &mut VM<'_, '_>) -> RunResult<Value> {
     let mut default_guard = HeapGuard::new(default, vm);
     let vm = default_guard.heap();
 
@@ -505,7 +500,7 @@ enum IterValue {
 }
 
 impl IterValue {
-    fn new(value: &Value, vm: &mut VM<'_, '_, impl ResourceTracker>) -> Option<Self> {
+    fn new(value: &Value, vm: &mut VM<'_, '_>) -> Option<Self> {
         match &value {
             Value::InternString(string_id) => Some(Self::from_str(vm.interns.get_str(*string_id))),
             Value::InternBytes(bytes_id) => Some(Self::from_intern_bytes(*bytes_id, vm.interns)),
@@ -545,7 +540,7 @@ impl IterValue {
     }
 
     /// Creates an iterator value from heap data.
-    fn from_heap_data(heap_id: HeapId, heap: &Heap<impl ResourceTracker>) -> Option<Self> {
+    fn from_heap_data(heap_id: HeapId, heap: &Heap) -> Option<Self> {
         match heap.get(heap_id) {
             // List: no captured len (checked dynamically), no mutation check
             HeapData::List(_) => Some(Self::HeapRef {
@@ -612,7 +607,7 @@ impl IterValue {
 
 impl DropWithHeap for MontyIter {
     #[inline]
-    fn drop_with_heap<H: ContainsHeap>(self, heap: &mut H) {
+    fn drop_with_heap(self, heap: &mut impl ContainsHeap) {
         Self::drop_with_heap(self, heap);
     }
 }

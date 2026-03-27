@@ -7,9 +7,7 @@
 use monty::{MontyObject, MontyRun, NameLookupResult, NoLimitTracker, PrintWriter, RunProgress};
 
 /// Resolves consecutive `NameLookup` yields by providing a `Function` object for each name.
-fn resolve_name_lookups<T: monty::ResourceTracker>(
-    mut progress: RunProgress<T>,
-) -> Result<RunProgress<T>, monty::MontyException> {
+fn resolve_name_lookups(mut progress: RunProgress) -> Result<RunProgress, monty::MontyException> {
     while let RunProgress::NameLookup(lookup) = progress {
         let name = lookup.name.clone();
         progress = lookup.resume(
@@ -129,7 +127,7 @@ fn run_progress_dump_load_roundtrip() {
     let bytes = progress.dump().unwrap();
 
     // Load it back
-    let loaded: RunProgress<NoLimitTracker> = RunProgress::load(&bytes).unwrap();
+    let loaded: RunProgress = RunProgress::load(&bytes).unwrap();
 
     // Should still be at the external function call
     let call = loaded.into_function_call().expect("should be at function call");
@@ -150,7 +148,7 @@ fn run_progress_dump_load_multiple_calls() {
     let progress = runner.start(vec![], NoLimitTracker, PrintWriter::Stdout).unwrap();
     let progress = resolve_name_lookups(progress).unwrap();
     let bytes = progress.dump().unwrap();
-    let loaded: RunProgress<NoLimitTracker> = RunProgress::load(&bytes).unwrap();
+    let loaded: RunProgress = RunProgress::load(&bytes).unwrap();
     let call = loaded.into_function_call().unwrap();
     assert_eq!(call.function_name, "ext_fn");
     assert_eq!(call.args, vec![MontyObject::Int(1)]);
@@ -162,7 +160,7 @@ fn run_progress_dump_load_multiple_calls() {
 
     // Dump/load at second call
     let bytes = progress.dump().unwrap();
-    let loaded: RunProgress<NoLimitTracker> = RunProgress::load(&bytes).unwrap();
+    let loaded: RunProgress = RunProgress::load(&bytes).unwrap();
     let call = loaded.into_function_call().unwrap();
     assert_eq!(call.function_name, "ext_fn");
     assert_eq!(call.args, vec![MontyObject::Int(2)]);
@@ -179,7 +177,7 @@ fn run_progress_complete_roundtrip() {
     let progress = runner.start(vec![], NoLimitTracker, PrintWriter::Stdout).unwrap();
 
     let bytes = progress.dump().unwrap();
-    let loaded: RunProgress<NoLimitTracker> = RunProgress::load(&bytes).unwrap();
+    let loaded: RunProgress = RunProgress::load(&bytes).unwrap();
 
     assert_eq!(loaded.into_complete().unwrap(), MontyObject::Int(3));
 }

@@ -8,7 +8,6 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, RunResult, SimpleException},
     heap::{DropWithHeap, HeapData, HeapGuard},
-    resource::ResourceTracker,
     sorting::{apply_permutation, sort_indices},
     types::{List, MontyIter, PyTrait},
     value::Value,
@@ -19,7 +18,7 @@ use crate::{
 /// Returns a new sorted list from the items in an iterable.
 /// Supports `key` and `reverse` keyword arguments matching Python's
 /// `sorted(iterable, /, *, key=None, reverse=False)` signature.
-pub fn builtin_sorted(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_sorted(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (iterable, key_fn, reverse) = parse_sorted_args(args, vm)?;
     defer_drop!(key_fn, vm);
 
@@ -68,10 +67,7 @@ pub fn builtin_sorted(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues
 /// Returns `(iterable, key_fn, reverse)` where `key_fn` is `None` when no key
 /// function was provided (or `None` was explicitly passed), and `reverse` defaults
 /// to `false`.
-fn parse_sorted_args(
-    args: ArgValues,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
-) -> RunResult<(Value, Option<Value>, bool)> {
+fn parse_sorted_args(args: ArgValues, vm: &mut VM<'_, '_>) -> RunResult<(Value, Option<Value>, bool)> {
     let (mut positional, kwargs) = args.into_parts();
 
     // Extract the single required positional argument

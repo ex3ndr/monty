@@ -16,12 +16,11 @@ use crate::{
     exception_private::{ExcType, RunError, SimpleException},
     heap::{HeapData, HeapGuard, HeapId, HeapReadOutput},
     intern::FunctionId,
-    resource::ResourceTracker,
     types::{List, PyTrait},
     value::Value,
 };
 
-impl<T: ResourceTracker> VM<'_, '_, T> {
+impl VM<'_, '_> {
     /// Executes the Await opcode.
     ///
     /// Pops the awaitable from the stack and handles it based on its type:
@@ -233,7 +232,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
 
         // Track memory for the locals
         let size = namespace_values.len() * std::mem::size_of::<Value>();
-        self.heap.tracker_mut().on_allocate(|| size)?;
+        self.heap.tracker_mut().on_allocate(size)?;
 
         // Extend the stack with the coroutine's pre-bound locals
         let stack_base = self.stack.len();
@@ -636,7 +635,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
 
         // Track memory for the locals
         let size = namespace_values.len() * std::mem::size_of::<Value>();
-        self.heap.tracker_mut().on_allocate(|| size)?;
+        self.heap.tracker_mut().on_allocate(size)?;
 
         let stack_base = self.stack.len();
         self.stack.extend(namespace_values);

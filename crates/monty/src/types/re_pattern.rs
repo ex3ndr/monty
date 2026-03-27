@@ -24,7 +24,7 @@ use crate::{
     heap::{DropWithHeap, Heap, HeapData, HeapId, HeapItem, HeapRead},
     intern::StaticStrings,
     modules::re::{ASCII, DOTALL, IGNORECASE, MULTILINE},
-    resource::{ResourceError, ResourceTracker, check_estimated_size},
+    resource::{ResourceError, check_estimated_size},
     types::{List, PyTrait, ReMatch, Str, Type, allocate_tuple, str::string_repr_fmt},
     value::{EitherStr, Value},
 };
@@ -94,7 +94,7 @@ impl RePattern {
     /// `pattern.search(string)` — find first match anywhere in the string.
     ///
     /// Returns a `ReMatch` heap object on success, or `Value::None` if no match.
-    pub fn search(&self, text: &str, heap: &Heap<impl ResourceTracker>) -> RunResult<Value> {
+    pub fn search(&self, text: &str, heap: &Heap) -> RunResult<Value> {
         match self.compiled.captures(text) {
             Ok(Some(caps)) => {
                 let m = ReMatch::from_captures(&caps, text, &self.pattern, &self.compiled);
@@ -112,7 +112,7 @@ impl RePattern {
     /// anchor forces the engine to try all alternatives at position 0.
     ///
     /// Returns a `ReMatch` heap object on success, or `Value::None` if no match.
-    pub fn match_start(&self, text: &str, heap: &Heap<impl ResourceTracker>) -> RunResult<Value> {
+    pub fn match_start(&self, text: &str, heap: &Heap) -> RunResult<Value> {
         match self.compiled_match.captures(text) {
             Ok(Some(caps)) => {
                 let match_obj = ReMatch::from_captures(&caps, text, &self.pattern, &self.compiled);
@@ -130,7 +130,7 @@ impl RePattern {
     /// anchors force the engine to try all alternatives for a full-string match.
     ///
     /// Returns a `ReMatch` heap object on success, or `Value::None` if no match.
-    pub fn fullmatch(&self, text: &str, heap: &Heap<impl ResourceTracker>) -> RunResult<Value> {
+    pub fn fullmatch(&self, text: &str, heap: &Heap) -> RunResult<Value> {
         match self.compiled_fullmatch.captures(text) {
             Ok(Some(caps)) => {
                 let match_obj = ReMatch::from_captures(&caps, text, &self.pattern, &self.compiled);
@@ -147,7 +147,7 @@ impl RePattern {
     /// - No capture groups: returns a list of matched strings
     /// - One capture group: returns a list of the group's matched strings
     /// - Multiple capture groups: returns a list of tuples of matched strings
-    pub fn findall(&self, text: &str, heap: &Heap<impl ResourceTracker>) -> RunResult<Value> {
+    pub fn findall(&self, text: &str, heap: &Heap) -> RunResult<Value> {
         let cap_count = self.compiled.captures_len();
         let mut results = Vec::new();
 
@@ -198,7 +198,7 @@ impl RePattern {
     /// after each match, bailing out immediately if the budget is exceeded. This
     /// avoids both false rejections from conservative pre-estimates and untracked
     /// Rust heap allocations from delegating to `fancy_regex::replace_all()`.
-    pub fn sub(&self, repl: &str, text: &str, count: usize, heap: &Heap<impl ResourceTracker>) -> RunResult<Value> {
+    pub fn sub(&self, repl: &str, text: &str, count: usize, heap: &Heap) -> RunResult<Value> {
         // Translate Python-style backreferences (\1, \2) to regex crate style ($1, $2)
         let rust_repl = translate_replacement(repl);
         let effective_count = if count == 0 { usize::MAX } else { count };
@@ -225,7 +225,7 @@ impl RePattern {
     ///
     /// Returns a list of strings. If `maxsplit` is non-zero, at most `maxsplit`
     /// splits occur and the remainder of the string is returned as the final element.
-    pub fn split(&self, text: &str, maxsplit: usize, heap: &Heap<impl ResourceTracker>) -> RunResult<Value> {
+    pub fn split(&self, text: &str, maxsplit: usize, heap: &Heap) -> RunResult<Value> {
         let pieces: Vec<&str> = if maxsplit == 0 {
             self.compiled
                 .split(text)
@@ -253,7 +253,7 @@ impl RePattern {
     /// Eagerly collects all match objects into a list. This differs from CPython's
     /// lazy iterator but produces the same results when iterated. The VM's `GetIter`
     /// opcode handles iteration over the returned list.
-    pub fn finditer(&self, text: &str, heap: &Heap<impl ResourceTracker>) -> RunResult<Value> {
+    pub fn finditer(&self, text: &str, heap: &Heap) -> RunResult<Value> {
         let mut results = Vec::new();
         for caps in self.compiled.captures_iter(text) {
             let caps = caps.map_err(ExcType::re_pattern_error)?;
@@ -267,29 +267,24 @@ impl RePattern {
 }
 
 impl<'h> PyTrait<'h> for HeapRead<'h, RePattern> {
-    fn py_type(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Type {
+    fn py_type(&self, _vm: &VM<'h, '_>) -> Type {
         Type::RePattern
     }
 
-    fn py_len(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Option<usize> {
+    fn py_len(&self, _vm: &VM<'h, '_>) -> Option<usize> {
         None
     }
 
-    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_>) -> Result<bool, ResourceError> {
         Ok(self.get(vm.heap) == other.get(vm.heap))
     }
 
-    fn py_bool(&self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> bool {
+    fn py_bool(&self, _vm: &mut VM<'h, '_>) -> bool {
         // Pattern objects are always truthy (matching CPython).
         true
     }
 
-    fn py_repr_fmt(
-        &self,
-        f: &mut impl Write,
-        vm: &VM<'h, '_, impl ResourceTracker>,
-        _heap_ids: &mut AHashSet<HeapId>,
-    ) -> RunResult<()> {
+    fn py_repr_fmt(&self, f: &mut impl Write, vm: &VM<'h, '_>, _heap_ids: &mut AHashSet<HeapId>) -> RunResult<()> {
         let this = self.get(vm.heap);
         write!(f, "re.compile(")?;
         string_repr_fmt(&this.pattern, f)?;
@@ -312,7 +307,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, RePattern> {
         Ok(write!(f, ")")?)
     }
 
-    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<CallResult>> {
+    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, '_>) -> RunResult<Option<CallResult>> {
         match attr.static_string() {
             Some(StaticStrings::PatternAttr) => {
                 let s = Str::new(self.get(vm.heap).pattern.clone());
@@ -327,7 +322,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, RePattern> {
     fn py_call_attr(
         &mut self,
         _self_id: HeapId,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
+        vm: &mut VM<'h, '_>,
         attr: &EitherStr,
         args: ArgValues,
     ) -> RunResult<CallResult> {
@@ -385,11 +380,7 @@ impl HeapItem for RePattern {
 /// Separated from the main `py_call_attr` match to keep the borrow checker happy —
 /// extracting multiple string arguments requires careful ordering of borrows.
 /// Supports `count` as either positional or keyword argument.
-fn call_pattern_sub<'h>(
-    pattern: &HeapRead<'h, RePattern>,
-    args: ArgValues,
-    vm: &mut VM<'h, '_, impl ResourceTracker>,
-) -> RunResult<Value> {
+fn call_pattern_sub<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: &mut VM<'h, '_>) -> RunResult<Value> {
     let (pos, kwargs) = args.into_parts();
     defer_drop_mut!(pos, vm);
     let kwargs = kwargs.into_iter();
@@ -476,11 +467,7 @@ fn call_pattern_sub<'h>(
 /// Handles `pattern.split(string, maxsplit=0)` argument extraction and dispatch.
 ///
 /// Supports `maxsplit` as either positional or keyword argument.
-fn call_pattern_split<'h>(
-    pattern: &HeapRead<'h, RePattern>,
-    args: ArgValues,
-    vm: &mut VM<'h, '_, impl ResourceTracker>,
-) -> RunResult<Value> {
+fn call_pattern_split<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: &mut VM<'h, '_>) -> RunResult<Value> {
     let (pos, kwargs) = args.into_parts();
     defer_drop_mut!(pos, vm);
     let kwargs = kwargs.into_iter();
@@ -534,7 +521,7 @@ fn call_pattern_split<'h>(
 /// Extracts a `maxsplit` value from an optional `Value`.
 ///
 /// Returns 0 if not provided. Negative values are treated as 0 (split all).
-fn extract_maxsplit(val: Option<Value>, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<usize> {
+fn extract_maxsplit(val: Option<Value>, vm: &mut VM<'_, '_>) -> RunResult<usize> {
     match val {
         None => Ok(0),
         Some(Value::Int(n)) if n <= 0 => Ok(0),
@@ -697,7 +684,7 @@ fn translate_g_backref(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, res
 /// Extracts a string from a `Value`, supporting both interned and heap strings.
 ///
 /// Returns a `Cow<str>` to avoid unnecessary copies for interned strings.
-pub(crate) fn value_to_str<'a>(val: &'a Value, vm: &'a VM<'_, '_, impl ResourceTracker>) -> RunResult<Cow<'a, str>> {
+pub(crate) fn value_to_str<'a>(val: &'a Value, vm: &'a VM<'_, '_>) -> RunResult<Cow<'a, str>> {
     match val {
         Value::InternString(string_id) => Ok(Cow::Borrowed(vm.interns.get_str(*string_id))),
         Value::Ref(heap_id) => match vm.heap.get(*heap_id) {

@@ -35,7 +35,7 @@ use crate::{
     heap::{DropWithHeap, HeapData, HeapId},
     intern::StaticStrings,
     modules::ModuleFunctions,
-    resource::{ResourceError, ResourceTracker},
+    resource::ResourceError,
     types::{Module, PyTrait, RePattern, Str, Type, re_pattern::value_to_str},
     value::Value,
 };
@@ -89,7 +89,7 @@ pub(crate) enum ReFunctions {
 ///
 /// # Panics
 /// Panics if the required strings have not been pre-interned during prepare phase.
-pub fn create_module(vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<HeapId, ResourceError> {
+pub fn create_module(vm: &mut VM<'_, '_>) -> Result<HeapId, ResourceError> {
     let mut module = Module::new(StaticStrings::Re);
 
     // Functions
@@ -183,11 +183,7 @@ pub fn create_module(vm: &mut VM<'_, '_, impl ResourceTracker>) -> Result<HeapId
 /// Extracts arguments, compiles patterns as needed, and delegates to the appropriate
 /// `RePattern` method. All functions return `CallResult::Value` since regex
 /// operations don't need host involvement.
-pub(super) fn call(
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
-    function: ReFunctions,
-    args: ArgValues,
-) -> RunResult<CallResult> {
+pub(super) fn call(vm: &mut VM<'_, '_>, function: ReFunctions, args: ArgValues) -> RunResult<CallResult> {
     match function {
         ReFunctions::Compile => call_compile(vm, args).map(CallResult::Value),
         ReFunctions::Search => call_search(vm, args).map(CallResult::Value),
@@ -205,7 +201,7 @@ pub(super) fn call(
 ///
 /// Returns a `re.Pattern` object that can be reused for multiple match operations.
 /// The pattern is compiled once and stored, avoiding recompilation overhead.
-fn call_compile(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+fn call_compile(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (pattern_val, flags) = extract_pattern_and_flags(args, "re.compile", vm)?;
     let compiled = RePattern::compile(pattern_val, flags)?;
     Ok(Value::Ref(vm.heap.allocate(HeapData::RePattern(Box::new(compiled)))?))
@@ -215,7 +211,7 @@ fn call_compile(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> R
 ///
 /// Compiles the pattern, then delegates to `RePattern::search`. Returns a `re.Match`
 /// object on success, or `None` if no position in the string matches.
-fn call_search(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+fn call_search(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (pattern, text, flags) = extract_pattern_string_flags(args, "re.search", vm)?;
     let compiled = RePattern::compile(pattern, flags)?;
     compiled.search(&text, vm.heap)
@@ -225,7 +221,7 @@ fn call_search(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> Ru
 ///
 /// Compiles the pattern, then delegates to `RePattern::match_start`. Returns a `re.Match`
 /// object if the pattern matches at position 0, or `None` otherwise.
-fn call_match(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+fn call_match(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (pattern, text, flags) = extract_pattern_string_flags(args, "re.match", vm)?;
     let compiled = RePattern::compile(pattern, flags)?;
     compiled.match_start(&text, vm.heap)
@@ -235,7 +231,7 @@ fn call_match(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> Run
 ///
 /// Compiles the pattern, then delegates to `RePattern::fullmatch`. Returns a `re.Match`
 /// object if the pattern matches the whole string, or `None` otherwise.
-fn call_fullmatch(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+fn call_fullmatch(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (pattern, text, flags) = extract_pattern_string_flags(args, "re.fullmatch", vm)?;
     let compiled = RePattern::compile(pattern, flags)?;
     compiled.fullmatch(&text, vm.heap)
@@ -245,7 +241,7 @@ fn call_fullmatch(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) ->
 ///
 /// Compiles the pattern, then delegates to `RePattern::findall`. Returns a list of
 /// strings or tuples depending on the number of capture groups (matching CPython semantics).
-fn call_findall(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+fn call_findall(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (pattern, text, flags) = extract_pattern_string_flags(args, "re.findall", vm)?;
     let compiled = RePattern::compile(pattern, flags)?;
     compiled.findall(&text, vm.heap)
@@ -256,7 +252,7 @@ fn call_findall(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> R
 /// Compiles the pattern, then delegates to `RePattern::sub`. Replaces occurrences of the
 /// pattern with the replacement string. When `count` is 0, all matches are replaced.
 /// Supports both positional and keyword arguments for `count` and `flags`.
-fn call_sub(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+fn call_sub(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (pos, kwargs) = args.into_parts();
     defer_drop_mut!(pos, vm);
     let kwargs = kwargs.into_iter();
@@ -369,7 +365,7 @@ fn call_sub(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunRe
 /// Returns a list of strings. If `maxsplit` is non-zero, at most `maxsplit` splits occur
 /// and the remainder of the string is returned as the final list element.
 /// Supports both positional and keyword arguments for `maxsplit` and `flags`.
-fn call_split(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+fn call_split(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (pos, kwargs) = args.into_parts();
     defer_drop_mut!(pos, vm);
     let kwargs = kwargs.into_iter();
@@ -444,7 +440,7 @@ fn call_split(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> Run
 /// Eagerly collects all match objects into a list. When the user iterates with
 /// `for m in re.finditer(...)`, the VM's `GetIter` opcode handles iteration
 /// over the returned list automatically.
-fn call_finditer(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+fn call_finditer(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let (pattern, text, flags) = extract_pattern_string_flags(args, "re.finditer", vm)?;
     let compiled = RePattern::compile(pattern, flags)?;
     compiled.finditer(&text, vm.heap)
@@ -457,7 +453,7 @@ fn call_finditer(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> 
 /// escaped, matching CPython 3.7+ behavior.
 ///
 /// Escaped characters: `\t \n \v \f \r   # $ & ( ) * + - . ? [ \ ] ^ { | } ~`
-fn call_escape(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+fn call_escape(vm: &mut VM<'_, '_>, args: ArgValues) -> RunResult<Value> {
     let arg = args.get_one_arg("re.escape", vm.heap)?;
     defer_drop!(arg, vm);
     let text = value_to_str(arg, vm)?.into_owned();
@@ -509,7 +505,7 @@ fn should_escape(c: char) -> bool {
 /// Extracts a `maxsplit` value from an optional `Value`.
 ///
 /// Returns 0 if not provided. Negative values are treated as 0 (split all).
-fn extract_maxsplit(val: Option<Value>, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<usize> {
+fn extract_maxsplit(val: Option<Value>, vm: &mut VM<'_, '_>) -> RunResult<usize> {
     match val {
         None => Ok(0),
         Some(Value::Int(n)) if n <= 0 => Ok(0),
@@ -532,11 +528,7 @@ fn extract_maxsplit(val: Option<Value>, vm: &mut VM<'_, '_, impl ResourceTracker
 ///
 /// Accepts 1 or 2 positional arguments: `(pattern)` or `(pattern, flags)`.
 /// The pattern must be a string, and flags must be a non-negative integer.
-fn extract_pattern_and_flags(
-    args: ArgValues,
-    func_name: &str,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
-) -> RunResult<(String, u16)> {
+fn extract_pattern_and_flags(args: ArgValues, func_name: &str, vm: &mut VM<'_, '_>) -> RunResult<(String, u16)> {
     let (pattern_val, flags_val) = args.get_one_two_args(func_name, vm.heap)?;
     defer_drop!(pattern_val, vm);
 
@@ -548,7 +540,7 @@ fn extract_pattern_and_flags(
 
 /// Extracts a flags value from an optional `Value`, validating it is a non-negative integer
 /// that fits in a `u16`.
-fn extract_flags(flags_val: Option<Value>, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<u16> {
+fn extract_flags(flags_val: Option<Value>, vm: &mut VM<'_, '_>) -> RunResult<u16> {
     match flags_val {
         Some(Value::Int(n)) => {
             u16::try_from(n).map_err(|_| ExcType::type_error("flags must be a non-negative integer"))
@@ -571,7 +563,7 @@ fn extract_flags(flags_val: Option<Value>, vm: &mut VM<'_, '_, impl ResourceTrac
 fn extract_pattern_string_flags(
     args: ArgValues,
     func_name: &str,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
+    vm: &mut VM<'_, '_>,
 ) -> RunResult<(String, Cow<'static, str>, u16)> {
     let pos = args.into_pos_only(func_name, vm.heap)?;
     defer_drop_mut!(pos, vm);

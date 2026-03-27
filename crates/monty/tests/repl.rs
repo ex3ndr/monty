@@ -5,7 +5,7 @@
 
 use monty::{
     ExtFunctionResult, MontyException, MontyObject, MontyRepl, NoLimitTracker, PrintWriter, ReplContinuationMode,
-    ReplProgress, ReplStartError, ResourceTracker, detect_repl_continuation_mode,
+    ReplProgress, ReplStartError, detect_repl_continuation_mode,
 };
 
 #[test]
@@ -23,11 +23,11 @@ fn repl_executes_only_new_code() {
     assert_eq!(output, MontyObject::Int(1));
 }
 
-fn feed_run_print(repl: &mut MontyRepl<impl ResourceTracker>, code: &str) -> Result<MontyObject, MontyException> {
+fn feed_run_print(repl: &mut MontyRepl, code: &str) -> Result<MontyObject, MontyException> {
     repl.feed_run(code, vec![], PrintWriter::Stdout)
 }
 
-fn init_repl(code: &str) -> (MontyRepl<NoLimitTracker>, MontyObject) {
+fn init_repl(code: &str) -> (MontyRepl, MontyObject) {
     let mut repl = MontyRepl::new("repl.py", NoLimitTracker);
     let output = feed_run_print(&mut repl, code).unwrap();
     (repl, output)
@@ -134,7 +134,7 @@ fn repl_dump_load_survives_between_snippets() {
     feed_run_print(&mut repl, "total = total + 1").unwrap();
 
     let bytes = repl.dump().unwrap();
-    let mut loaded: MontyRepl<NoLimitTracker> = MontyRepl::load(&bytes).unwrap();
+    let mut loaded: MontyRepl = MontyRepl::load(&bytes).unwrap();
 
     feed_run_print(&mut loaded, "total = total * 21").unwrap();
     let output = feed_run_print(&mut loaded, "total").unwrap();
@@ -148,7 +148,7 @@ fn repl_dump_load_preserves_heap_aliasing() {
     feed_run_print(&mut repl, "a.append(1)").unwrap();
 
     let bytes = repl.dump().unwrap();
-    let mut loaded: MontyRepl<NoLimitTracker> = MontyRepl::load(&bytes).unwrap();
+    let mut loaded: MontyRepl = MontyRepl::load(&bytes).unwrap();
 
     feed_run_print(&mut loaded, "b.append(2)").unwrap();
     assert_eq!(
@@ -187,7 +187,7 @@ fn repl_progress_dump_load_roundtrip() {
     let progress = repl.feed_start("ext_fn(20) + 22", vec![], PrintWriter::Stdout).unwrap();
 
     let bytes = progress.dump().unwrap();
-    let loaded: ReplProgress<NoLimitTracker> = ReplProgress::load(&bytes).unwrap();
+    let loaded: ReplProgress = ReplProgress::load(&bytes).unwrap();
 
     let call = loaded.into_function_call().expect("expected function call");
     assert_eq!(call.args, vec![MontyObject::Int(20)]);
@@ -219,7 +219,7 @@ async def main():
 
     let progress = call.resume_pending(PrintWriter::Stdout).unwrap();
     let bytes = progress.dump().unwrap();
-    let loaded: ReplProgress<NoLimitTracker> = ReplProgress::load(&bytes).unwrap();
+    let loaded: ReplProgress = ReplProgress::load(&bytes).unwrap();
     let state = loaded.into_resolve_futures().expect("expected resolve futures");
     assert_eq!(state.pending_call_ids(), &[call_id]);
 
