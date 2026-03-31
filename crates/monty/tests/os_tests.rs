@@ -54,6 +54,12 @@ fn run_to_oscall(code: &str) -> (OsFunction, Vec<MontyObject>) {
                     offset_seconds: None,
                     timezone_name: None,
                 }),
+                OsFunction::FileOpen => MontyObject::FileData {
+                    path: "mock".to_owned(),
+                    mode: "r".to_owned(),
+                    content: "mock content".to_owned(),
+                },
+                OsFunction::FileClose => MontyObject::None,
             };
             let function = call.function;
             let args = call.args.clone();

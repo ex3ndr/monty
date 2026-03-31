@@ -1260,13 +1260,14 @@ impl<'h, 'a, T: ResourceTracker> VM<'h, 'a, T> {
                     let arg_count = fetch_u8!(cached_frame) as usize;
 
                     // Sync IP before call (builtins like map() may call evaluate_function
-                    // which pushes frames and runs a nested run() loop)
+                    // which pushes frames and runs a nested run() loop, or open() yields OsCall)
                     self.current_frame_mut().ip = cached_frame.ip;
 
-                    match self.exec_call_builtin_function(builtin_id, arg_count) {
-                        Ok(result) => self.push(result),
-                        Err(err) => catch_sync!(self, cached_frame, err),
-                    }
+                    handle_call_result!(
+                        self,
+                        cached_frame,
+                        self.exec_call_builtin_function(builtin_id, arg_count)
+                    );
                 }
                 Opcode::CallBuiltinType => {
                     // Fetch operands: type_id (u8) + arg_count (u8)

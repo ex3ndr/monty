@@ -26,8 +26,9 @@ use crate::{
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec, ParsedFormatSpec, encode_format_spec},
     function::Function,
-    intern::{Interns, StringId},
+    intern::{Interns, StaticStrings, StringId},
     modules::StandardLib,
+    namespace::NamespaceId,
     parse::{CodeRange, ExceptHandler, Try},
     value::{EitherStr, Value},
 };
@@ -396,6 +397,12 @@ impl<'a> Compiler<'a> {
             }
             Node::FunctionDef(func_def) => self.compile_function_def(func_def)?,
             Node::Try(try_block) => self.compile_try(try_block)?,
+            Node::With {
+                context_expr,
+                optional_var,
+                manager_slot,
+                body,
+            } => self.compile_with(context_expr, optional_var.as_ref(), *manager_slot, body)?,
             Node::Import { names } => {
                 for import_name in names {
                     self.compile_import(import_name.module_name, &import_name.binding);
@@ -2739,6 +2746,212 @@ impl<'a> Compiler<'a> {
     /// same approach CPython uses - each path has different stack state at entry
     /// (e.g., return has a value on stack, break has popped the iterator), so we
     /// can't easily share a single copy. The duplication is intentional.
+    /// Compiles a `with` statement using the context manager protocol.
+    ///
+    /// The bytecode structure is:
+    /// ```text
+    /// [evaluate EXPR]              # push context manager
+    /// DUP                          # stack: [mgr, mgr]
+    /// STORE mgr_slot               # save manager for __exit__; stack: [mgr]
+    /// CALL_ATTR __enter__ 0        # stack: [enter_result]
+    /// STORE var_slot / POP          # store or discard enter result
+    ///
+    /// body_start:
+    ///   [body]
+    /// body_end:
+    ///
+    /// # === Normal exit path ===
+    /// LOAD mgr_slot                # load manager
+    /// LOAD_NONE × 3                # None, None, None
+    /// CALL_ATTR __exit__ 3         # call __exit__(None, None, None)
+    /// POP                          # discard result
+    /// JUMP end
+    ///
+    /// # === Exception handler ===
+    /// handler:
+    ///   POP                        # pop exception from operand stack
+    ///   LOAD mgr_slot              # load manager
+    ///   LOAD_NONE × 3              # TODO: pass actual exc_type, exc_val, exc_tb
+    ///   CALL_ATTR __exit__ 3
+    ///   JUMP_IF_TRUE suppress
+    ///   RERAISE
+    /// suppress:
+    ///   CLEAR_EXCEPTION
+    /// end:
+    /// ```
+    fn compile_with(
+        &mut self,
+        context_expr: &ExprLoc,
+        optional_var: Option<&Identifier>,
+        manager_slot: Option<NamespaceId>,
+        body: &[PreparedNode],
+    ) -> Result<(), CompileError> {
+        let mgr_slot = u16::try_from(manager_slot.expect("manager_slot must be set during prepare").index())
+            .expect("manager slot exceeds u16");
+
+        let enter_id: StringId = StaticStrings::DunderEnter.into();
+        let exit_id: StringId = StaticStrings::DunderExit.into();
+        let enter_idx = u16::try_from(enter_id.index()).expect("enter name index exceeds u16");
+        let exit_idx = u16::try_from(exit_id.index()).expect("exit name index exceeds u16");
+
+        // === Setup ===
+        // Evaluate context expression → push manager
+        self.compile_expr(context_expr)?;
+        // Duplicate manager (one for __enter__, one saved for __exit__)
+        self.code.emit(Opcode::Dup);
+        // Store manager copy in hidden slot
+        if self.is_module_scope {
+            self.code.emit_u16(Opcode::StoreGlobal, mgr_slot);
+        } else {
+            self.code.emit_store_local(mgr_slot);
+        }
+        // Call __enter__() on the manager
+        self.code.emit_u16_u8(Opcode::CallAttr, enter_idx, 0);
+        // Store enter result in variable or discard
+        if let Some(var) = optional_var {
+            self.compile_store(var);
+        } else {
+            self.code.emit(Opcode::Pop);
+        }
+
+        // Record stack depth before body (for exception table unwinding)
+        let stack_depth = self.code.stack_depth();
+
+        // Push a FinallyTarget so return/break/continue call __exit__ first
+        self.finally_targets.push(FinallyTarget {
+            return_jumps: Vec::new(),
+            break_jumps: Vec::new(),
+            continue_jumps: Vec::new(),
+            loop_depth_at_entry: self.loop_stack.len(),
+        });
+
+        // === Body (protected by exception table) ===
+        let body_start = self.code.current_offset();
+        self.compile_block(body)?;
+        let body_end = self.code.current_offset();
+
+        // Jump to normal exit path (skip exception handler)
+        let normal_exit_jump = self.code.emit_jump(Opcode::Jump);
+
+        // === Exception handler ===
+        let handler_start = self.code.current_offset();
+        // VM pushes exception onto stack
+        self.code.adjust_stack_depth(1);
+        // Pop exception from operand stack (it's on exception_stack too)
+        self.code.emit(Opcode::Pop);
+        // Load manager and call __exit__(None, None, None)
+        self.emit_load_manager(mgr_slot);
+        self.code.emit(Opcode::LoadNone);
+        self.code.emit(Opcode::LoadNone);
+        self.code.emit(Opcode::LoadNone);
+        self.code.emit_u16_u8(Opcode::CallAttr, exit_idx, 3);
+        // If __exit__ returns truthy, suppress the exception
+        let suppress_jump = self.code.emit_jump(Opcode::JumpIfTrue);
+        self.code.emit(Opcode::Reraise);
+
+        // suppress: clear exception and continue
+        self.code.patch_jump(suppress_jump);
+        self.code.emit(Opcode::ClearException);
+        let after_suppress_jump = self.code.emit_jump(Opcode::Jump);
+
+        // === Return/break/continue paths through __exit__ ===
+        let finally_target = self.finally_targets.pop().expect("finally_targets should not be empty");
+
+        // Return path: return value is on stack
+        let return_path_start = if finally_target.return_jumps.is_empty() {
+            None
+        } else {
+            let start = self.code.current_offset();
+            for jump in &finally_target.return_jumps {
+                self.code.patch_jump(*jump);
+            }
+            // Return value is on stack, stack = stack_depth + 1
+            self.code.set_stack_depth(stack_depth + 1);
+            // Load manager and call __exit__(None, None, None)
+            self.emit_load_manager(mgr_slot);
+            self.code.emit(Opcode::LoadNone);
+            self.code.emit(Opcode::LoadNone);
+            self.code.emit(Opcode::LoadNone);
+            self.code.emit_u16_u8(Opcode::CallAttr, exit_idx, 3);
+            self.code.emit(Opcode::Pop); // discard __exit__ result
+            self.compile_return();
+            Some(start)
+        };
+
+        // Break path
+        if !finally_target.break_jumps.is_empty() {
+            for break_info in &finally_target.break_jumps {
+                self.code.patch_jump(break_info.jump);
+            }
+            self.code.set_stack_depth(stack_depth.saturating_sub(1));
+            self.emit_load_manager(mgr_slot);
+            self.code.emit(Opcode::LoadNone);
+            self.code.emit(Opcode::LoadNone);
+            self.code.emit(Opcode::LoadNone);
+            self.code.emit_u16_u8(Opcode::CallAttr, exit_idx, 3);
+            self.code.emit(Opcode::Pop);
+            self.compile_control_flow_after_finally(&finally_target.break_jumps, true);
+        }
+
+        // Continue path
+        if !finally_target.continue_jumps.is_empty() {
+            for continue_info in &finally_target.continue_jumps {
+                self.code.patch_jump(continue_info.jump);
+            }
+            self.code.set_stack_depth(stack_depth);
+            self.emit_load_manager(mgr_slot);
+            self.code.emit(Opcode::LoadNone);
+            self.code.emit(Opcode::LoadNone);
+            self.code.emit(Opcode::LoadNone);
+            self.code.emit_u16_u8(Opcode::CallAttr, exit_idx, 3);
+            self.code.emit(Opcode::Pop);
+            self.compile_control_flow_after_finally(&finally_target.continue_jumps, false);
+        }
+
+        // === Normal exit path ===
+        self.code.patch_jump(normal_exit_jump);
+        self.code.patch_jump(after_suppress_jump);
+        self.code.set_stack_depth(stack_depth);
+        // Load manager and call __exit__(None, None, None) for normal exit
+        self.emit_load_manager(mgr_slot);
+        self.code.emit(Opcode::LoadNone);
+        self.code.emit(Opcode::LoadNone);
+        self.code.emit(Opcode::LoadNone);
+        self.code.emit_u16_u8(Opcode::CallAttr, exit_idx, 3);
+        self.code.emit(Opcode::Pop); // discard __exit__ result
+
+        // === Exception table entries ===
+        // Body → exception handler
+        self.code.add_exception_entry(ExceptionEntry::new(
+            u32::try_from(body_start).expect("bytecode offset exceeds u32"),
+            u32::try_from(body_end).expect("bytecode offset exceeds u32") + 3, // +3 to include JUMP
+            u32::try_from(handler_start).expect("bytecode offset exceeds u32"),
+            stack_depth,
+        ));
+
+        // If there's a return path, protect it with an exception entry too
+        if let Some(return_start) = return_path_start {
+            let normal_exit = self.code.current_offset();
+            self.code.add_exception_entry(ExceptionEntry::new(
+                u32::try_from(return_start).expect("bytecode offset exceeds u32"),
+                u32::try_from(normal_exit).expect("bytecode offset exceeds u32"),
+                u32::try_from(handler_start).expect("bytecode offset exceeds u32"),
+                stack_depth,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Emits a load instruction for the hidden context manager slot.
+    fn emit_load_manager(&mut self, mgr_slot: u16) {
+        if self.is_module_scope {
+            self.code.emit_u16(Opcode::LoadGlobal, mgr_slot);
+        } else {
+            self.code.emit_load_local(mgr_slot);
+        }
+    }
+
     fn compile_try(&mut self, try_block: &Try<PreparedNode>) -> Result<(), CompileError> {
         let has_finally = !try_block.finally.is_empty();
         let has_handlers = !try_block.handlers.is_empty();

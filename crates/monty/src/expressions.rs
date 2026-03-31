@@ -543,6 +543,26 @@ pub enum Node<F> {
         target_position: CodeRange,
         value: ExprLoc,
     },
+    /// Context manager statement: `with EXPR as VAR: BODY`
+    ///
+    /// Multiple `with` items are desugared to nested `With` nodes by the parser.
+    /// The context manager protocol calls `__enter__()` on entry and `__exit__()`
+    /// on exit (including exceptional exits).
+    With {
+        /// The context manager expression (e.g., `open('file')`).
+        context_expr: ExprLoc,
+        /// Optional target variable for `as VAR` clause.
+        /// If `None`, the result of `__enter__()` is discarded.
+        optional_var: Option<Identifier>,
+        /// Hidden local namespace slot for storing the context manager object.
+        ///
+        /// This is needed because `__exit__` must be called on the original context manager,
+        /// not the value returned by `__enter__` (they may differ). The slot is allocated
+        /// during the prepare phase. `None` in the parsed form, `Some` after prepare.
+        manager_slot: Option<NamespaceId>,
+        /// The body of the `with` block.
+        body: Vec<Self>,
+    },
     For {
         /// Loop target - either a single identifier or tuple unpacking pattern.
         target: UnpackTarget,

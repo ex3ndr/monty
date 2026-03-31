@@ -21,6 +21,7 @@ mod map;
 mod min_max; // min and max share implementation
 mod next;
 mod oct;
+mod open;
 mod ord;
 mod pow;
 mod print;
@@ -38,7 +39,7 @@ use strum::{Display, EnumString, FromRepr, IntoStaticStr};
 
 use crate::{
     args::ArgValues,
-    bytecode::VM,
+    bytecode::{CallResult, VM},
     exception_private::{ExcType, RunResult},
     resource::ResourceTracker,
     types::Type,
@@ -61,11 +62,14 @@ pub(crate) enum Builtins {
 
 impl Builtins {
     /// Calls this builtin with the given arguments.
-    pub fn call(self, vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    ///
+    /// Returns `CallResult` to support builtins like `open()` that need to
+    /// yield `OsCall` to the host rather than returning a value directly.
+    pub fn call(self, vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<CallResult> {
         match self {
             Self::Function(b) => b.call(vm, args),
-            Self::ExcType(exc) => exc.call(vm, args),
-            Self::Type(t) => t.call(vm, args),
+            Self::ExcType(exc) => exc.call(vm, args).map(CallResult::Value),
+            Self::Type(t) => t.call(vm, args).map(CallResult::Value),
         }
     }
 
@@ -181,7 +185,7 @@ pub enum BuiltinsFunctions {
     Next,
     // object - handled by Type enum
     Oct,
-    // Open,
+    Open,
     Ord,
     Pow,
     Print,
@@ -210,7 +214,19 @@ impl BuiltinsFunctions {
     ///
     /// All builtins receive the full VM context, which provides access to the heap,
     /// interned strings, and print output.
-    pub(crate) fn call(self, vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    ///
+    /// Returns `CallResult` to support builtins like `open()` that need to yield
+    /// `OsCall` to the host rather than returning a value directly.
+    pub(crate) fn call(self, vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<CallResult> {
+        match self {
+            Self::Open => open::builtin_open(vm, args),
+            // All other builtins return a Value directly
+            other => other.call_value(vm, args).map(CallResult::Value),
+        }
+    }
+
+    /// Executes builtins that always return a `Value` directly.
+    fn call_value(self, vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
         match self {
             Self::Abs => abs::builtin_abs(vm, args),
             Self::All => all::builtin_all(vm, args),
@@ -241,6 +257,7 @@ impl BuiltinsFunctions {
             Self::Sum => sum::builtin_sum(vm, args),
             Self::Type => type_::builtin_type(vm, args),
             Self::Zip => zip::builtin_zip(vm, args),
+            Self::Open => unreachable!("Open is handled in call()"),
         }
     }
 }

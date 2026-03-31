@@ -580,6 +580,28 @@ impl<'i> Prepare<'i> {
                         finally,
                     }));
                 }
+                Node::With {
+                    context_expr,
+                    optional_var,
+                    body,
+                    ..
+                } => {
+                    let context_expr = self.prepare_expression(context_expr)?;
+                    let optional_var = optional_var.map(|var| {
+                        self.names_assigned_in_order
+                            .insert(self.interner.get_str(var.name_id).to_string());
+                        self.get_id(var).0
+                    });
+                    // Allocate a hidden local slot for the context manager.
+                    let mgr_slot = self.allocate_anonymous_slot();
+                    let body = self.prepare_nodes(body)?;
+                    new_nodes.push(Node::With {
+                        context_expr,
+                        optional_var,
+                        manager_slot: Some(mgr_slot),
+                        body,
+                    });
+                }
                 Node::Import { names } => {
                     // Resolve each binding identifier to get the namespace slot
                     let resolved_names = names
@@ -1604,6 +1626,17 @@ impl<'i> Prepare<'i> {
         ))
     }
 
+    /// Allocates an anonymous local namespace slot for internal use.
+    ///
+    /// Used by the `with` statement to store the context manager object so that
+    /// `__exit__` can be called in exception handlers. The slot has no associated
+    /// Python name — it's purely an implementation detail of the bytecode.
+    fn allocate_anonymous_slot(&mut self) -> NamespaceId {
+        let id = NamespaceId::new(self.namespace_size);
+        self.namespace_size += 1;
+        id
+    }
+
     /// Resolves an identifier to its namespace index and scope, creating a new entry if needed.
     ///
     /// TODO This whole implementation seems ugly at best.
@@ -2082,6 +2115,20 @@ fn collect_scope_info_from_node(
                 collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names, interner);
             }
         }
+        Node::With {
+            context_expr,
+            optional_var,
+            body,
+            ..
+        } => {
+            collect_assigned_names_from_expr(context_expr, assigned_names, interner);
+            if let Some(var) = optional_var {
+                assigned_names.insert(interner.get_str(var.name_id).to_string());
+            }
+            for n in body {
+                collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names, interner);
+            }
+        }
         // Import creates bindings for each module name (or alias)
         Node::Import { names, .. } => {
             for import_name in names {
@@ -2389,6 +2436,12 @@ fn collect_cell_vars_from_node(
                 collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
             }
             for n in finally {
+                collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
+            }
+        }
+        Node::With { context_expr, body, .. } => {
+            collect_cell_vars_from_expr(context_expr, our_locals, cell_vars, interner);
+            for n in body {
                 collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
             }
         }
@@ -2751,6 +2804,12 @@ fn collect_referenced_names_from_node(node: &ParseNode, referenced: &mut AHashSe
                 collect_referenced_names_from_node(n, referenced, interner);
             }
             for n in finally {
+                collect_referenced_names_from_node(n, referenced, interner);
+            }
+        }
+        Node::With { context_expr, body, .. } => {
+            collect_referenced_names_from_expr(context_expr, referenced, interner);
+            for n in body {
                 collect_referenced_names_from_node(n, referenced, interner);
             }
         }

@@ -103,6 +103,10 @@ pub fn monty_to_js<'e>(obj: &MontyObject, env: &'e Env) -> Result<JsMontyObject<
         // Function objects are internal to the name lookup protocol and should not normally
         // appear as final output values. If they do, represent as a string with the function name.
         MontyObject::Function { name, .. } => env.create_string(name)?.into_unknown(env)?,
+        MontyObject::FileData { path, mode, .. } => {
+            let repr = format!("<_io.TextIOWrapper name='{path}' mode='{mode}'>");
+            env.create_string(&repr)?.into_unknown(env)?
+        }
     };
     Ok(JsMontyObject(unknown))
 }

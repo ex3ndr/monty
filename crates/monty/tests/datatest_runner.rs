@@ -1060,6 +1060,52 @@ fn dispatch_os_call(
                 .into()
             }
         }
+        OsFunction::FileOpen => {
+            // args[0] is path, args[1] is mode
+            let mode = String::try_from(&args[1]).expect("open: second arg must be mode string");
+            if mode == "r" {
+                // Read mode: return file content
+                if let Some(file) = get_virtual_file(&path) {
+                    match str::from_utf8(&file.content) {
+                        Ok(text) => MontyObject::FileData {
+                            path,
+                            mode,
+                            content: text.to_owned(),
+                        }
+                        .into(),
+                        Err(_) => MontyException::new(
+                            ExcType::UnicodeDecodeError,
+                            Some("'utf-8' codec can't decode bytes".to_owned()),
+                        )
+                        .into(),
+                    }
+                } else {
+                    MontyException::new(
+                        ExcType::FileNotFoundError,
+                        Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                    )
+                    .into()
+                }
+            } else {
+                // Write mode: return empty FileData (content is accumulated in VM)
+                MontyObject::FileData {
+                    path,
+                    mode,
+                    content: String::new(),
+                }
+                .into()
+            }
+        }
+        OsFunction::FileClose => {
+            // args[0] is path, args[1] is written content
+            let content = String::try_from(&args[1]).expect("file.close: second arg must be content string");
+            MUTABLE_VFS.with(|vfs| {
+                let mut vfs = vfs.borrow_mut();
+                vfs.files.insert(path.clone(), (content.into_bytes(), 0o644));
+                vfs.deleted_files.remove(&path);
+            });
+            MontyObject::None.into()
+        }
     }
 }
 

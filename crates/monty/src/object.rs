@@ -325,6 +325,21 @@ pub enum MontyObject {
         /// Optional docstring for the function.
         docstring: Option<String>,
     },
+    /// File data returned by the host after an `open()` OsCall.
+    ///
+    /// For read mode, `content` contains the file content.
+    /// For write mode, `content` is empty (writes are accumulated in the `FileObject`).
+    ///
+    /// This is input-only: when the host resolves `OsFunction::FileOpen`, it returns this
+    /// variant which the VM converts to a `FileObject` on the heap.
+    FileData {
+        /// The file path.
+        path: String,
+        /// The file mode (e.g., `"r"`, `"w"`).
+        mode: String,
+        /// The file content (populated for read mode, empty for write mode).
+        content: String,
+    },
     /// Fallback for values that cannot be represented as other variants.
     ///
     /// Contains the `repr()` string of the original value.
@@ -537,6 +552,14 @@ impl MontyObject {
                     Ok(Value::Ref(vm.heap.allocate(HeapData::ExtFunction(name))?))
                 }
             }
+            Self::FileData { path, mode, content } => {
+                use crate::types::file_object::FileObject;
+                let file = match mode.as_str() {
+                    "w" => FileObject::new_write(path),
+                    _ => FileObject::new_read(path, content),
+                };
+                Ok(Value::Ref(vm.heap.allocate(HeapData::FileObject(file))?))
+            }
             Self::Repr(_) => Err(InvalidInputError::invalid_type("'Repr' is not a valid input value")),
             Self::Cycle(_, _) => Err(InvalidInputError::invalid_type("'Cycle' is not a valid input value")),
         }
@@ -736,6 +759,7 @@ impl MontyObject {
                         name: name.clone(),
                         docstring: None,
                     },
+                    HeapData::FileObject(_) => repr_or_error(object, vm),
                 };
 
                 // Remove from visited set after processing
@@ -994,6 +1018,7 @@ impl MontyObject {
             Self::Type(t) => write!(f, "<class '{t}'>"),
             Self::BuiltinFunction(func) => write!(f, "<built-in function {func}>"),
             Self::Function { name, .. } => write!(f, "<function '{name}' external>"),
+            Self::FileData { path, mode, .. } => write!(f, "<_io.TextIOWrapper name='{path}' mode='{mode}'>"),
             Self::Repr(s) => write!(f, "Repr({})", StringRepr(s)),
             Self::Cycle(_, placeholder) => f.write_str(placeholder),
         }
@@ -1032,6 +1057,7 @@ impl MontyObject {
             Self::Exception { .. } => true,
             Self::Path(_) => true,          // Path instances are always truthy
             Self::Dataclass { .. } => true, // Dataclass instances are always truthy
+            Self::FileData { .. } => true,
             Self::Type(_) | Self::BuiltinFunction(_) | Self::Function { .. } | Self::Repr(_) | Self::Cycle(_, _) => {
                 true
             }
@@ -1067,6 +1093,7 @@ impl MontyObject {
             Self::Type(_) => "type",
             Self::BuiltinFunction(_) => "builtin_function_or_method",
             Self::Function { .. } => "function",
+            Self::FileData { .. } => "TextIOWrapper",
             Self::Repr(_) => "repr",
             Self::Cycle(_, _) => "cycle",
         }

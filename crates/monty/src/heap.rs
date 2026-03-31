@@ -26,7 +26,7 @@ use crate::{
     types::{
         Bytes, Dataclass, Dict, DictItemsView, DictKeysView, DictValuesView, FrozenSet, List, LongInt, Module,
         MontyIter, NamedTuple, Path, Range, ReMatch, RePattern, Set, Slice, Str, TimeZone, Tuple, allocate_tuple, date,
-        datetime, timedelta, timezone,
+        datetime, file_object, timedelta, timezone,
     },
     value::Value,
 };
@@ -234,6 +234,7 @@ impl<'a, T: ResourceTracker> HeapReader<'a, T> {
             HeapData::DateTime(d) => HeapReadOutput::DateTime(heap_read(base, d, readers)),
             HeapData::TimeDelta(d) => HeapReadOutput::TimeDelta(heap_read(base, d, readers)),
             HeapData::TimeZone(d) => HeapReadOutput::TimeZone(heap_read(base, d, readers)),
+            HeapData::FileObject(f) => HeapReadOutput::FileObject(heap_read(base, f, readers)),
         }
     }
 
@@ -319,6 +320,7 @@ pub enum HeapReadOutput<'a> {
     DateTime(HeapRead<'a, datetime::DateTime>),
     TimeDelta(HeapRead<'a, timedelta::TimeDelta>),
     TimeZone(HeapRead<'a, timezone::TimeZone>),
+    FileObject(HeapRead<'a, file_object::FileObject>),
 }
 
 pub struct HeapRead<'a, T: ?Sized> {

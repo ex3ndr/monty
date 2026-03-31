@@ -92,6 +92,19 @@ pub enum OsFunction {
     /// The host should return `MontyObject::DateTime`.
     #[strum(serialize = "datetime.now")]
     DateTimeNow,
+    /// Open a file for reading or writing.
+    ///
+    /// Takes two arguments: the file path (string) and the mode (string, e.g. `"r"` or `"w"`).
+    /// The host should return `MontyObject::FileData` for read mode (containing the file
+    /// content), or `MontyObject::None` for write mode (the file will be written on close).
+    #[strum(serialize = "open")]
+    FileOpen,
+    /// Close a file and flush written content to disk (write mode only).
+    ///
+    /// Takes two arguments: the file path (string) and the accumulated written content (string).
+    /// The host should write the content to the file and return `MontyObject::None`.
+    #[strum(serialize = "file.close")]
+    FileClose,
 }
 
 impl TryFrom<StaticStrings> for OsFunction {

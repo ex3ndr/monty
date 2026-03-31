@@ -11,6 +11,8 @@ This module is shared between:
 
 from __future__ import annotations
 
+import builtins
+import io
 import os
 import stat as stat_module
 from dataclasses import dataclass
@@ -523,6 +525,62 @@ class VirtualEnviron:
 
 # Monkey-patch os.environ to use virtual environment for test keys
 os.environ = VirtualEnviron()
+
+
+# =============================================================================
+# Virtual open() for context manager tests
+# =============================================================================
+
+if not hasattr(builtins, '_monty_original_open'):
+    builtins._monty_original_open = builtins.open  # pyright: ignore[reportAttributeAccessIssue]
+
+_original_open = builtins._monty_original_open  # pyright: ignore[reportAttributeAccessIssue,reportUnknownVariableType,reportUnknownMemberType]
+
+
+def _virtual_open(file: str, mode: str = 'r', **kwargs: object) -> object:
+    """Virtual open() that reads/writes from the virtual filesystem for /virtual paths.
+
+    For paths starting with '/virtual', uses the VirtualPath filesystem.
+    For all other paths, falls through to the real open().
+    """
+    if file.startswith('/virtual') or file.startswith('/nonexistent'):
+        if mode == 'r':
+            # Read from virtual filesystem
+            vpath = VirtualPath(file)
+            if not vpath.exists():
+                raise FileNotFoundError(f"[Errno 2] No such file or directory: '{file}'")
+            content = vpath.read_text()
+            sio = io.StringIO(content)
+            sio.name = file
+            sio.mode = 'r'  # pyright: ignore[reportAttributeAccessIssue]
+            return sio
+        if mode == 'w':
+            # Return a writable StringIO that flushes to VFS on close
+            class VirtualWriteFile(io.StringIO):
+                """StringIO wrapper that writes to virtual filesystem on close."""
+
+                def __init__(self, path: str) -> None:
+                    super().__init__()
+                    self._vpath = path
+
+                def close(self) -> None:
+                    if not self.closed:
+                        VirtualPath(self._vpath).write_text(self.getvalue())
+                    super().close()
+
+                def __enter__(self) -> 'VirtualWriteFile':
+                    return self
+
+                def __exit__(self, *args: object) -> bool:  # pyright: ignore[reportIncompatibleMethodOverride]
+                    self.close()
+                    return False
+
+            return VirtualWriteFile(file)
+        raise ValueError(f"invalid mode: '{mode}'")
+    return _original_open(file, mode, **kwargs)  # pyright: ignore[reportUnknownVariableType,reportCallIssue,reportArgumentType]
+
+
+builtins.open = _virtual_open
 
 
 # All external functions available to iter mode tests

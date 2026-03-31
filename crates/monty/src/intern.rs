@@ -581,6 +581,15 @@ pub enum StaticStrings {
     Finditer,
     /// `match.groupdict()` method
     Groupdict,
+
+    // ==========================
+    // Context manager protocol
+    /// `__enter__` method for context managers
+    #[strum(serialize = "__enter__")]
+    DunderEnter,
+    /// `__exit__` method for context managers
+    #[strum(serialize = "__exit__")]
+    DunderExit,
 }
 
 impl StaticStrings {

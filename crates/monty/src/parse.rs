@@ -195,6 +195,31 @@ impl<'a> Parser<'a> {
         statements.into_iter().map(|f| self.parse_statement(f)).collect()
     }
 
+    /// Parses `with` items, desugaring multiple items into nested `With` nodes.
+    ///
+    /// `with a() as x, b() as y: body` becomes:
+    /// `With { a() as x, body: [With { b() as y, body }] }`
+    fn parse_with_items(&mut self, items: Vec<ast::WithItem>, body: Vec<ParseNode>) -> Result<ParseNode, ParseError> {
+        // Desugar from right to left: innermost item wraps the body,
+        // each outer item wraps the previous result.
+        let mut current_body = body;
+        for item in items.into_iter().rev() {
+            let context_expr = self.parse_expression(item.context_expr)?;
+            let optional_var = item
+                .optional_vars
+                .map(|vars| self.parse_identifier(*vars))
+                .transpose()?;
+            current_body = vec![Node::With {
+                context_expr,
+                optional_var,
+                manager_slot: None,
+                body: current_body,
+            }];
+        }
+        // Unwrap the single outer node
+        Ok(current_body.into_iter().next().expect("items was non-empty"))
+    }
+
     fn parse_elif_else_clauses(&mut self, clauses: Vec<ElifElseClause>) -> Result<Vec<ParseNode>, ParseError> {
         let mut tail: Vec<ParseNode> = Vec::new();
         for clause in clauses.into_iter().rev() {
@@ -371,18 +396,27 @@ impl<'a> Parser<'a> {
                 let or_else = self.parse_elif_else_clauses(elif_else_clauses)?;
                 Ok(Node::If { test, body, or_else })
             }
-            Stmt::With(ast::StmtWith { is_async, range, .. }) => {
+            Stmt::With(ast::StmtWith {
+                is_async,
+                range,
+                items,
+                body,
+                ..
+            }) => {
                 if is_async {
-                    Err(ParseError::not_implemented(
+                    return Err(ParseError::not_implemented(
                         "async context managers (async with)",
                         self.convert_range(range),
-                    ))
-                } else {
-                    Err(ParseError::not_implemented(
-                        "context managers (with statements)",
-                        self.convert_range(range),
-                    ))
+                    ));
                 }
+                if items.is_empty() {
+                    return Err(ParseError::not_implemented(
+                        "with statement with no items",
+                        self.convert_range(range),
+                    ));
+                }
+                let body = self.parse_statements(body)?;
+                self.parse_with_items(items, body)
             }
             Stmt::Match(m) => Err(ParseError::not_implemented(
                 "pattern matching (match statements)",

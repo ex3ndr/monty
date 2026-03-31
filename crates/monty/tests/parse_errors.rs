@@ -53,8 +53,8 @@ fn unknown_imports_compile_successfully_error_deferred_to_runtime() {
 }
 
 #[test]
-fn with_statement_returns_not_implemented_error() {
-    let result = MontyRun::new("with open('f') as f: pass".to_owned(), "test.py", vec![]);
+fn async_with_statement_returns_not_implemented_error() {
+    let result = MontyRun::new("async with open('f') as f: pass".to_owned(), "test.py", vec![]);
     assert_eq!(get_exc_type(result), ExcType::NotImplementedError);
 }
 

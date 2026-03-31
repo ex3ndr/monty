@@ -259,6 +259,13 @@ pub fn monty_to_py(py: Python<'_>, obj: &MontyObject, dc_registry: &DcRegistry) 
         // Function objects are internal to the name lookup protocol and should not normally
         // appear as final output values. If they do, represent as a string with the function name.
         MontyObject::Function { name, .. } => Ok(PyString::new(py, name).into_any().unbind()),
+        // FileData is input-only (from host to VM) and should not appear as output.
+        MontyObject::FileData { path, mode, .. } => Ok(PyString::new(
+            py,
+            &format!("<_io.TextIOWrapper name='{path}' mode='{mode}'>"),
+        )
+        .into_any()
+        .unbind()),
     }
 }
 

@@ -12,9 +12,9 @@ use crate::{
     heap::{DropWithHeap, HeapId, HeapItem, HeapReadOutput},
     intern::FunctionId,
     types::{
-        Bytes, Dataclass, Dict, DictItemsView, DictKeysView, DictValuesView, FrozenSet, List, LongInt, Module,
-        MontyIter, NamedTuple, Path, PyTrait, Range, ReMatch, RePattern, Set, Slice, Str, Tuple, Type, date, datetime,
-        dict_view::DictView, timedelta, timezone,
+        Bytes, Dataclass, Dict, DictItemsView, DictKeysView, DictValuesView, FileObject, FrozenSet, List, LongInt,
+        Module, MontyIter, NamedTuple, Path, PyTrait, Range, ReMatch, RePattern, Set, Slice, Str, Tuple, Type, date,
+        datetime, dict_view::DictView, timedelta, timezone,
     },
     value::{EitherStr, Value},
 };
@@ -123,6 +123,11 @@ pub(crate) enum HeapData {
     TimeDelta(timedelta::TimeDelta),
     /// A fixed-offset `datetime.timezone` value.
     TimeZone(timezone::TimeZone),
+    /// A file object from `open()`, holding eagerly-loaded content or write buffer.
+    ///
+    /// Implements the context manager protocol and file I/O methods.
+    /// Leaf type: no heap references, not GC-tracked.
+    FileObject(FileObject),
 }
 
 impl HeapData {
@@ -240,6 +245,7 @@ impl HeapData {
             Self::DateTime(_) => Type::DateTime,
             Self::TimeDelta(_) => Type::TimeDelta,
             Self::TimeZone(_) => Type::TimeZone,
+            Self::FileObject(_) => Type::TextIOWrapper,
         }
     }
 
@@ -276,6 +282,7 @@ impl HeapData {
             Self::DateTime(d) => d.py_estimate_size(),
             Self::TimeDelta(d) => d.py_estimate_size(),
             Self::TimeZone(d) => d.py_estimate_size(),
+            Self::FileObject(f) => f.py_estimate_size(),
         }
     }
 }
@@ -450,6 +457,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::RePattern(p) => p.py_bool(vm),
             Self::TimeDelta(td) => td.py_bool(vm),
             Self::Date(_) | Self::DateTime(_) | Self::TimeZone(_) => true,
+            Self::FileObject(f) => f.py_bool(vm),
         }
     }
 
@@ -479,6 +487,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             HeapReadOutput::TimeDelta(td) => Ok(td.py_call_attr(self_id, vm, attr, args)?),
             HeapReadOutput::Date(d) => Ok(d.py_call_attr(self_id, vm, attr, args)?),
             HeapReadOutput::DateTime(dt) => Ok(dt.py_call_attr(self_id, vm, attr, args)?),
+            HeapReadOutput::FileObject(f) => Ok(f.py_call_attr(self_id, vm, attr, args)?),
             // Types without methods — return AttributeError
             _ => {
                 args.drop_with_heap(vm);
@@ -518,6 +527,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::DateTime(d) => d.py_type(vm),
             Self::TimeDelta(d) => d.py_type(vm),
             Self::TimeZone(d) => d.py_type(vm),
+            Self::FileObject(f) => f.py_type(vm),
         }
     }
 
@@ -715,6 +725,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::DateTime(d) => d.py_repr_fmt(f, vm, heap_ids),
             Self::TimeDelta(d) => d.py_repr_fmt(f, vm, heap_ids),
             Self::TimeZone(d) => d.py_repr_fmt(f, vm, heap_ids),
+            Self::FileObject(file) => file.py_repr_fmt(f, vm, heap_ids),
         }
     }
 
@@ -913,6 +924,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Date(d) => d.py_getattr(attr, vm),
             Self::DateTime(dt) => dt.py_getattr(attr, vm),
             Self::TimeDelta(td) => td.py_getattr(attr, vm),
+            Self::FileObject(f) => f.py_getattr(attr, vm),
             _ => Ok(None),
         }
     }
