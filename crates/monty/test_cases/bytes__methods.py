@@ -283,6 +283,25 @@ assert b'\x01\x02\x03'.hex(':', 2) == '01:0203', 'hex +2 three bytes'
 assert b'\x01\x02\x03\x04\x05'.hex(':', -2) == '0102:0304:05', 'hex -2 odd bytes'
 assert b'\x01\x02\x03'.hex(':', -2) == '0102:03', 'hex -2 three bytes'
 
+# Regression: bytes_per_sep values outside the C int range used to panic via
+# `unsigned_abs() * 2` overflow. Match CPython and raise OverflowError instead.
+try:
+    b'x'.hex(' ', -(2**63))
+    assert False, 'hex with i64::MIN bytes_per_sep should raise OverflowError'
+except OverflowError as e:
+    assert str(e) == 'Python int too large to convert to C int', f'hex i64::MIN message, got: {e}'
+
+try:
+    b'x'.hex(' ', 2**31)
+    assert False, 'hex with bytes_per_sep > i32::MAX should raise OverflowError'
+except OverflowError as e:
+    assert str(e) == 'Python int too large to convert to C int', f'hex i32::MAX+1 message, got: {e}'
+
+# i32 bounds themselves are still accepted; with such a large chunk size all hex pairs
+# fit in a single group so no separator is emitted.
+assert b'abcde'.hex(' ', 2**31 - 1) == '6162636465', 'hex with bytes_per_sep at i32::MAX'
+assert b'abcde'.hex(' ', -(2**31)) == '6162636465', 'hex with bytes_per_sep at i32::MIN'
+
 # === bytes.fromhex() ===
 assert bytes.fromhex('deadbeef') == b'\xde\xad\xbe\xef', 'fromhex basic'
 assert bytes.fromhex('DEADBEEF') == b'\xde\xad\xbe\xef', 'fromhex uppercase'

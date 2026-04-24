@@ -8,7 +8,7 @@ use crate::{
     args::ArgValues,
     bytecode::{CallResult, VM},
     defer_drop, defer_drop_mut,
-    exception_private::{ExcType, RunError, RunResult},
+    exception_private::{ExcType, RunError, RunResult, SimpleException},
     heap::{DropWithHeap, Heap, HeapData, HeapGuard, HeapId, HeapItem, HeapRead, HeapReadOutput},
     intern::StaticStrings,
     resource::{ResourceError, ResourceTracker},
@@ -752,7 +752,15 @@ fn do_list_sort<'h>(
 
     sort_indices(&mut indices, compare_values, reverse, vm)?;
 
-    // 3. Rearrange items in-place according to the sorted permutation
+    // 3. If the key function (or a comparison via __lt__) mutated the list's length,
+    //    `apply_permutation` would index out of bounds. Match CPython's behavior and
+    //    raise `ValueError` instead of panicking. The list is left in whatever state
+    //    the user's code produced — we do not attempt to restore or partially sort it.
+    if list.get(vm.heap).items.len() != len {
+        return Err(SimpleException::new_msg(ExcType::ValueError, "list modified during sort").into());
+    }
+
+    // 4. Rearrange items in-place according to the sorted permutation
     apply_permutation(&mut list.get_mut(vm.heap).items, &mut indices);
     Ok(())
 }

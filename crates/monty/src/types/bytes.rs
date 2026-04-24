@@ -2100,8 +2100,13 @@ fn bytes_hex<'h>(
         if bytes_per_sep == 0 || bytes.is_empty() {
             hex_chars.iter().collect()
         } else {
-            // Insert separator every `bytes_per_sep` bytes (2*bytes_per_sep hex chars)
-            let chars_per_group = usize::try_from(bytes_per_sep.unsigned_abs()).unwrap_or(usize::MAX) * 2;
+            // Insert separator every `bytes_per_sep` bytes (2*bytes_per_sep hex chars).
+            // `bytes_per_sep` is validated into the `i32` range by `parse_bytes_hex_args`, so
+            // `unsigned_abs()` is at most `i32::MAX + 1 = 2^31` and doubling it fits comfortably
+            // in `u64`. `saturating_mul` is still used to keep this safe on 32-bit `usize` targets.
+            let chars_per_group = usize::try_from(bytes_per_sep.unsigned_abs())
+                .unwrap_or(usize::MAX)
+                .saturating_mul(2);
             let mut result = String::new();
 
             if bytes_per_sep > 0 {
@@ -2138,7 +2143,7 @@ fn bytes_hex<'h>(
 }
 
 /// Parses arguments for bytes.hex method.
-fn parse_bytes_hex_args(args: ArgValues, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<(Option<char>, i64)> {
+fn parse_bytes_hex_args(args: ArgValues, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<(Option<char>, i32)> {
     let pos = args.into_pos_only("bytes.hex", vm.heap)?;
     defer_drop!(pos, vm);
 
@@ -2166,7 +2171,12 @@ fn parse_bytes_hex_args(args: ArgValues, vm: &mut VM<'_, '_, impl ResourceTracke
     };
 
     let bytes_per_sep = if let Some(bps_value) = bps_value {
-        bps_value.as_int(vm)?
+        let raw = bps_value.as_int(vm)?;
+        // CPython stores `bytes_per_sep` as a C int, so values outside `i32` range
+        // raise `OverflowError: Python int too large to convert to C int`. Matching
+        // that behavior here also avoids unsigned-abs overflow further down.
+        i32::try_from(raw)
+            .map_err(|_| SimpleException::new_msg(ExcType::OverflowError, "Python int too large to convert to C int"))?
     } else {
         1
     };

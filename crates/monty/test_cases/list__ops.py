@@ -325,6 +325,24 @@ except IndexError:
     pass  # expected since last_char('') raises IndexError
 
 
+# key function that mutates the list being sorted must raise ValueError
+# (regression: this used to panic with "index out of bounds" when the list grew
+# beyond the precomputed `indices` length).
+lst_mut = [3, 1, 2]
+
+
+def mutating_key(x):
+    lst_mut.append(99)
+    return x
+
+
+try:
+    lst_mut.sort(key=mutating_key)
+    assert False, 'sort with mutating key should raise ValueError'
+except ValueError as e:
+    assert str(e) == 'list modified during sort', f'sort mutation error message, got: {e}'
+
+
 # === List assignment (setitem) ===
 # Basic assignment
 lst = [1, 2, 3]
