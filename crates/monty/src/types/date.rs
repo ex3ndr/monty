@@ -241,34 +241,30 @@ impl HeapItem for Date {
 /// `HeapRead`-based dispatch for `Date`, enabling the `HeapReadOutput` enum to
 /// delegate `PyTrait` calls to heap-resident dates.
 impl<'h> PyTrait<'h> for HeapRead<'h, Date> {
-    fn py_type(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Type {
+    fn py_type(&self, _vm: &VM<'h, impl ResourceTracker>) -> Type {
         Type::Date
     }
 
-    fn py_len(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Option<usize> {
+    fn py_len(&self, _vm: &VM<'h, impl ResourceTracker>) -> Option<usize> {
         None
     }
 
-    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, vm: &mut VM<'h, impl ResourceTracker>) -> Result<bool, ResourceError> {
         Ok(*self.get(vm) == *other.get(vm))
     }
 
-    fn py_cmp(
-        &self,
-        other: &Self,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
-    ) -> Result<Option<Ordering>, ResourceError> {
+    fn py_cmp(&self, other: &Self, vm: &mut VM<'h, impl ResourceTracker>) -> Result<Option<Ordering>, ResourceError> {
         Ok(self.get(vm).partial_cmp(other.get(vm)))
     }
 
-    fn py_bool(&self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> bool {
+    fn py_bool(&self, _vm: &mut VM<'h, impl ResourceTracker>) -> bool {
         true
     }
 
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        vm: &VM<'h, '_, impl ResourceTracker>,
+        vm: &VM<'h, impl ResourceTracker>,
         _heap_ids: &mut AHashSet<HeapId>,
     ) -> RunResult<()> {
         let (year, month, day) = to_ymd(*self.get(vm));
@@ -276,7 +272,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Date> {
         Ok(())
     }
 
-    fn py_str(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> RunResult<Cow<'static, str>> {
+    fn py_str(&self, vm: &VM<'h, impl ResourceTracker>) -> RunResult<Cow<'static, str>> {
         let (year, month, day) = to_ymd(*self.get(vm));
         Ok(Cow::Owned(format!("{year:04}-{month:02}-{day:02}")))
     }
@@ -284,7 +280,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Date> {
     fn py_call_attr(
         &mut self,
         _self_id: HeapId,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
+        vm: &mut VM<'h, impl ResourceTracker>,
         attr: &EitherStr,
         args: ArgValues,
     ) -> RunResult<CallResult> {
@@ -329,7 +325,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Date> {
         }
     }
 
-    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<CallResult>> {
+    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<Option<CallResult>> {
         let (year, month, day) = to_ymd(*self.get(vm));
         match attr.string_id() {
             Some(id) if id == StaticStrings::Year => Ok(Some(CallResult::Value(Value::Int(i64::from(year))))),

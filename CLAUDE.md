@@ -85,27 +85,37 @@ All heap-allocated Python objects (lists, dicts, strings, etc.) are stored in a 
 
 #### Core concepts
 
-- **`HeapReader<'a, T>`** — A scoped accessor for the heap that produces `HeapRead` handles. Created exclusively via `HeapReader::with(heap, |heap| { ... })`, which is the **single safety boundary** for the read API. The `for<'a>` closure bound makes the lifetime `'a` universally quantified, so `HeapRead` pointers cannot escape the closure. The closure receives the reader by value and typically hands it straight to `VM::new` / `VM::restore`, which take ownership — this avoids a pointer-to-pointer indirection inside `VM`.
-- **`HeapRead<'a, T>`** — A typed handle to a specific heap entry. Created by `reader.read(id)` (or `vm.heap.read(id)` once inside a VM) which returns a `HeapReadOutput<'a>` enum that you match on. Tracks a reader count that prevents the entry from being freed while the handle exists.
+- **`HeapReader::with(heap, &mut data, |reader, data| { ... })`** — The **single safety boundary** for both bare-reader use and VM construction. The `for<'a>` HRTB on the closure makes the heap-borrow lifetime universally quantified per call, which is what keeps `HeapRead<'a, _>` handles from escaping. The `data` argument (typically a tuple like `(&executor, print)` or `(interns, print)` carrying the env-borrowed bits the VM constructor needs) is rebranded to `'a` at the call site so its borrowed fields flow through with the chosen `'a` — captures inside the closure body cannot satisfy `for<'a>` (would require `'static`), which is why env-borrowed bits are passed through `data` rather than captured. Pass `&mut ()` when no data is needed.
+- **`HeapReader<'a, T>`** — A scoped accessor for the heap that produces `HeapRead` handles. Owned by the `VM`.
+- **`VM::new(reader, globals, interns, module_code, print)`** / **`VM::restore(reader, snapshot, interns, module_code, print)`** — Plain constructors. Not safety boundaries themselves; they just package the reader (which carries the brand) plus the env-borrowed bits into a `VM<'h, T>`. Always call them inside a `HeapReader::with` closure.
+- **`HeapRead<'a, T>`** — A typed handle to a specific heap entry. Created by `vm.heap.read(id)` which returns a `HeapReadOutput<'a>` enum that you match on. Tracks a reader count that prevents the entry from being freed while the handle exists.
 - **`HeapReadOutput<'a>`** — Enum over all `HeapRead<'a, T>` variants (one per `HeapData` variant). Pattern match to get the typed handle.
-- **`ContainsHeapReader<'h>`** — Trait implemented by both `HeapReader<'h, T>` and `VM<'h, '_, T>`. `HeapRead::get`/`get_mut` accept any `&impl ContainsHeapReader<'h>`, so call sites can pass either a bare reader (typically inside `HeapReader::with` before VM construction, or in tests) *or* a `&VM` directly without going through `&vm.heap`.
+- **`ContainsHeapReader<'h>`** — Trait implemented by both `HeapReader<'h, T>` and `VM<'h, T>`. `HeapRead::get`/`get_mut` accept any `&impl ContainsHeapReader<'h>`, so call sites pass `&vm` directly without going through `&vm.heap`.
 
 #### Reading and mutating heap data
 
 ```rust
-// Scoped heap access — safety boundary stays at HeapReader::with
-HeapReader::with(heap, |reader| {
-    let mut vm = VM::new(globals, reader, &interns, print);   // reader consumed by VM
-    let output = vm.heap.read(some_id);                       // returns HeapReadOutput<'a>
+// Scoped heap access — safety boundary at HeapReader::with
+HeapReader::with(heap, &mut (&executor, print), |reader, (executor, print)| {
+    let mut vm = VM::new(
+        reader,
+        globals,
+        &executor.interns,
+        Some(&executor.module_code),
+        print.reborrow(),
+    );
+    let output = vm.heap.read(some_id);  // returns HeapReadOutput<'h>
     match output {
         HeapReadOutput::List(list) => {
-            let items = list.get(&vm);            // &List — pass the VM directly
+            let items = list.get(&vm);             // &List — pass the VM directly
             let items_mut = list.get_mut(&mut vm); // &mut List — pass the VM mutably
         }
         _ => { /* ... */ }
     }
 })
 ```
+
+`VM` has a single `'h` lifetime parameter. Interns, module code, and print writer references all live as long as the heap borrow does — at the `with` call boundary they're rebranded down to the HRTB `'h` (covariant references via subtyping; `PrintWriter` via an explicit `reborrow()` because its trait-object variant makes it invariant).
 
 Key borrowing rules:
 - `get(&self, &impl ContainsHeapReader)` → `&T` — immutable access, prevents heap mutation while reference lives
@@ -121,7 +131,7 @@ Type methods are implemented as `impl<'h> HeapRead<'h, T>` blocks. The `PyTrait<
 ```rust
 // Methods on a heap type
 impl<'h> HeapRead<'h, List> {
-    pub fn append(&mut self, vm: &mut VM<'h, '_, impl ResourceTracker>, item: Value) -> RunResult<()> {
+    pub fn append(&mut self, vm: &mut VM<'h, impl ResourceTracker>, item: Value) -> RunResult<()> {
         self.get_mut(vm).items.push(item);
         Ok(())
     }
@@ -129,8 +139,8 @@ impl<'h> HeapRead<'h, List> {
 
 // PyTrait implementation
 impl<'h> PyTrait<'h> for HeapRead<'h, List> {
-    fn py_type(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> Type { Type::List }
-    fn py_len(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> Option<usize> {
+    fn py_type(&self, vm: &VM<'h, impl ResourceTracker>) -> Type { Type::List }
+    fn py_len(&self, vm: &VM<'h, impl ResourceTracker>) -> Option<usize> {
         Some(self.get(vm).items.len())
     }
     // ...

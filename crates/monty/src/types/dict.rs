@@ -114,7 +114,7 @@ impl Dict {
     /// Assumes the caller is transferring ownership of all keys and values in the pairs.
     /// Does NOT increment reference counts since ownership is being transferred.
     /// Returns Err if any key is unhashable (e.g., list, dict).
-    pub fn from_pairs(pairs: Vec<(Value, Value)>, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Self> {
+    pub fn from_pairs(pairs: Vec<(Value, Value)>, vm: &mut VM<'_, impl ResourceTracker>) -> RunResult<Self> {
         let pairs_iter = pairs.into_iter();
         defer_drop_mut!(pairs_iter, vm);
         let dict = Self::with_capacity(pairs_iter.len());
@@ -139,7 +139,7 @@ impl Dict {
         &mut self,
         key: Value,
         value: Value,
-        vm: &mut VM<'_, '_, impl ResourceTracker>,
+        vm: &mut VM<'_, impl ResourceTracker>,
     ) -> RunResult<Option<Value>> {
         debug_assert!(json_key_string_slice(&key, &vm.heap, vm.interns).is_some());
 
@@ -227,7 +227,7 @@ impl<'h> HeapRead<'h, Dict> {
     pub(crate) fn dict_get<'a>(
         &'a self,
         key: &Value,
-        vm: &'a mut VM<'h, '_, impl ResourceTracker>,
+        vm: &'a mut VM<'h, impl ResourceTracker>,
     ) -> RunResult<Option<Value>> {
         let (opt_index, _hash) = self.find_index_hash(key, vm)?;
         if let Some(index) = opt_index {
@@ -277,12 +277,7 @@ impl Dict {
     /// If the key already exists, replaces the old value and returns it (caller now
     /// owns the old value and is responsible for its refcount).
     /// Returns Err if key is unhashable.
-    pub fn set(
-        &mut self,
-        key: Value,
-        value: Value,
-        vm: &mut VM<'_, '_, impl ResourceTracker>,
-    ) -> RunResult<Option<Value>> {
+    pub fn set(&mut self, key: Value, value: Value, vm: &mut VM<'_, impl ResourceTracker>) -> RunResult<Option<Value>> {
         vm.heap.protect_mut(self).set(key, value, vm)
     }
 }
@@ -297,12 +292,7 @@ impl<'h> HeapRead<'h, Dict> {
     /// If the key already exists, replaces the old value and returns it (caller now
     /// owns the old value and is responsible for its refcount).
     /// Returns Err if key is unhashable.
-    pub fn set(
-        &mut self,
-        key: Value,
-        value: Value,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
-    ) -> RunResult<Option<Value>> {
+    pub fn set(&mut self, key: Value, value: Value, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<Option<Value>> {
         // Track if we're adding a reference for GC optimization
         if matches!(key, Value::Ref(_)) || matches!(value, Value::Ref(_)) {
             self.get_mut(vm).contains_refs = true;
@@ -348,7 +338,7 @@ impl<'h> HeapRead<'h, Dict> {
     ///
     /// Reference counting: does not decrement refcounts for removed key and value;
     /// caller assumes ownership and is responsible for managing their refcounts.
-    pub fn pop(&mut self, key: &Value, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Option<(Value, Value)>> {
+    pub fn pop(&mut self, key: &Value, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<Option<(Value, Value)>> {
         // Find the key using the candidate-based lookup
         let (opt_index, _hash) = self.find_index_hash(key, vm)?;
 
@@ -423,7 +413,7 @@ impl Dict {
     ///
     /// For now, only real `dict` values use mapping-copy semantics; other values
     /// are interpreted as iterables of pairs.
-    pub fn init(vm: &mut VM<'_, '_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    pub fn init(vm: &mut VM<'_, impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
         let dict = Self::new();
         let mut dict_guard = HeapGuard::new(dict, vm);
 
@@ -453,11 +443,7 @@ impl Dict {
 }
 
 impl<'h> HeapRead<'h, Dict> {
-    fn find_index_hash(
-        &self,
-        key: &Value,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
-    ) -> RunResult<(Option<usize>, u64)> {
+    fn find_index_hash(&self, key: &Value, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<(Option<usize>, u64)> {
         let hash = key
             .py_hash(vm)?
             .ok_or_else(|| ExcType::type_error_unhashable_dict_key(key.py_type(vm)))?;
@@ -488,7 +474,7 @@ impl<'h> HeapRead<'h, Dict> {
     }
 
     /// Checks whether the dict contains a given key.
-    pub(crate) fn contains_key(&self, key: &Value, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<bool> {
+    pub(crate) fn contains_key(&self, key: &Value, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<bool> {
         let (opt_index, _hash) = self.find_index_hash(key, vm)?;
         Ok(opt_index.is_some())
     }
@@ -497,7 +483,7 @@ impl<'h> HeapRead<'h, Dict> {
     ///
     /// For dict sources, uses HeapReader::read() to access the source dict through
     /// the heap, enabling self-referential updates like `d.update(d)`.
-    fn merge_from_value(&mut self, other_value: Value, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<()> {
+    fn merge_from_value(&mut self, other_value: Value, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<()> {
         let mut guard = HeapGuard::new(other_value, vm);
         let (other_value, vm) = guard.as_parts_mut();
         if let Value::Ref(id) = other_value {
@@ -523,11 +509,7 @@ impl<'h> HeapRead<'h, Dict> {
     }
 
     /// Merges key-value pairs from an iterable of 2-item pairs.
-    fn merge_from_iterable_pairs(
-        &mut self,
-        iterable: Value,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
-    ) -> RunResult<()> {
+    fn merge_from_iterable_pairs(&mut self, iterable: Value, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<()> {
         let iter = MontyIter::new(iterable, vm)?;
         defer_drop_mut!(iter, vm);
 
@@ -568,7 +550,7 @@ impl<'h> HeapRead<'h, Dict> {
     }
 
     /// Merges kwargs into self.
-    fn merge_from_kwargs(&mut self, kwargs: KwargsValues, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<()> {
+    fn merge_from_kwargs(&mut self, kwargs: KwargsValues, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<()> {
         let kwargs_iter = kwargs.into_iter();
         defer_drop_mut!(kwargs_iter, vm);
         for (key, value) in kwargs_iter {
@@ -628,15 +610,15 @@ impl IntoIterator for Dict {
 /// `self.get(vm.heap)`, and mutation methods use `self.get_mut(vm.heap)`. This avoids
 /// taking the dict out of the heap, enabling self-referential operations like `d.update(d)`.
 impl<'h> PyTrait<'h> for HeapRead<'h, Dict> {
-    fn py_type(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Type {
+    fn py_type(&self, _vm: &VM<'h, impl ResourceTracker>) -> Type {
         Type::Dict
     }
 
-    fn py_len(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> Option<usize> {
+    fn py_len(&self, vm: &VM<'h, impl ResourceTracker>) -> Option<usize> {
         Some(self.get(vm).len())
     }
 
-    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, vm: &mut VM<'h, impl ResourceTracker>) -> Result<bool, ResourceError> {
         if self.get(vm).len() != other.get(vm).len() {
             return Ok(false);
         }
@@ -662,14 +644,14 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Dict> {
         Ok(true)
     }
 
-    fn py_bool(&self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> bool {
+    fn py_bool(&self, vm: &mut VM<'h, impl ResourceTracker>) -> bool {
         !self.get(vm).is_empty()
     }
 
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        vm: &VM<'h, '_, impl ResourceTracker>,
+        vm: &VM<'h, impl ResourceTracker>,
         heap_ids: &mut AHashSet<HeapId>,
     ) -> RunResult<()> {
         if self.get(vm).is_empty() {
@@ -703,14 +685,14 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Dict> {
         Ok(())
     }
 
-    fn py_getitem(&self, key: &Value, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Value> {
+    fn py_getitem(&self, key: &Value, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<Value> {
         match self.dict_get(key, vm)? {
             Some(value) => Ok(value),
             None => Err(ExcType::key_error(key, vm)),
         }
     }
 
-    fn py_setitem(&mut self, key: Value, value: Value, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<()> {
+    fn py_setitem(&mut self, key: Value, value: Value, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<()> {
         // Drop the old value if one was replaced
         if let Some(old_value) = self.set(key, value, vm)? {
             old_value.drop_with_heap(vm);
@@ -721,7 +703,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Dict> {
     fn py_call_attr(
         &mut self,
         self_id: HeapId,
-        vm: &mut VM<'h, '_, impl ResourceTracker>,
+        vm: &mut VM<'h, impl ResourceTracker>,
         attr: &EitherStr,
         args: ArgValues,
     ) -> RunResult<CallResult> {
@@ -852,7 +834,7 @@ impl DropWithHeap for DictEntry {
 /// Implements Python's `dict.clear()` method.
 ///
 /// Removes all items from the dict.
-fn dict_clear<'h>(dict: &mut HeapRead<'h, Dict>, vm: &mut VM<'h, '_, impl ResourceTracker>) {
+fn dict_clear<'h>(dict: &mut HeapRead<'h, Dict>, vm: &mut VM<'h, impl ResourceTracker>) {
     dict.get_mut(vm).indices.clear();
     mem::take(&mut dict.get_mut(vm).entries).drop_with_heap(vm);
     // Note: contains_refs stays true even if all refs removed, per conservative GC strategy
@@ -861,7 +843,7 @@ fn dict_clear<'h>(dict: &mut HeapRead<'h, Dict>, vm: &mut VM<'h, '_, impl Resour
 /// Implements Python's `dict.copy()` method.
 ///
 /// Returns a shallow copy of the dict.
-fn dict_copy<'h>(dict: &mut HeapRead<'h, Dict>, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Value> {
+fn dict_copy<'h>(dict: &mut HeapRead<'h, Dict>, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<Value> {
     // Copy all key-value pairs (incrementing refcounts)
     let pairs: Vec<(Value, Value)> = dict
         .get(vm)
@@ -883,7 +865,7 @@ fn dict_copy<'h>(dict: &mut HeapRead<'h, Dict>, vm: &mut VM<'h, '_, impl Resourc
 fn dict_update<'h>(
     dict: &mut HeapRead<'h, Dict>,
     args: ArgValues,
-    vm: &mut VM<'h, '_, impl ResourceTracker>,
+    vm: &mut VM<'h, impl ResourceTracker>,
 ) -> RunResult<Value> {
     let (pos_iter, kwargs) = args.into_parts();
     defer_drop_mut!(pos_iter, vm);
@@ -907,11 +889,7 @@ fn dict_update<'h>(
 ///
 /// This is shared between `dict()` construction and `dict.update()` so both
 /// entry points follow identical positional-source semantics.
-fn dict_merge_from_value(
-    dict: &mut Dict,
-    other_value: Value,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
-) -> RunResult<()> {
+fn dict_merge_from_value(dict: &mut Dict, other_value: Value, vm: &mut VM<'_, impl ResourceTracker>) -> RunResult<()> {
     let mut other_value_guard = HeapGuard::new(other_value, vm);
     {
         let (other_value, vm) = other_value_guard.as_parts();
@@ -945,7 +923,7 @@ fn dict_merge_from_value(
 fn dict_merge_from_iterable_pairs(
     dict: &mut Dict,
     iterable: Value,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
+    vm: &mut VM<'_, impl ResourceTracker>,
 ) -> RunResult<()> {
     let iter = MontyIter::new(iterable, vm)?;
     defer_drop_mut!(iter, vm);
@@ -994,7 +972,7 @@ fn dict_merge_from_iterable_pairs(
 fn dict_merge_from_kwargs(
     dict: &mut Dict,
     kwargs: KwargsValues,
-    vm: &mut VM<'_, '_, impl ResourceTracker>,
+    vm: &mut VM<'_, impl ResourceTracker>,
 ) -> RunResult<()> {
     let kwargs_iter = kwargs.into_iter();
     defer_drop_mut!(kwargs_iter, vm);
@@ -1012,7 +990,7 @@ fn dict_merge_from_kwargs(
 fn dict_setdefault<'h>(
     dict: &mut HeapRead<'h, Dict>,
     args: ArgValues,
-    vm: &mut VM<'h, '_, impl ResourceTracker>,
+    vm: &mut VM<'h, impl ResourceTracker>,
 ) -> RunResult<Value> {
     let (key, default) = args.get_one_two_args("setdefault", &mut vm.heap)?;
     let default = default.unwrap_or(Value::None);
@@ -1038,7 +1016,7 @@ fn dict_setdefault<'h>(
 ///
 /// Removes and returns the last inserted key-value pair as a tuple.
 /// Raises KeyError if the dict is empty.
-fn dict_popitem<'h>(dict: &mut HeapRead<'h, Dict>, vm: &mut VM<'h, '_, impl ResourceTracker>) -> RunResult<Value> {
+fn dict_popitem<'h>(dict: &mut HeapRead<'h, Dict>, vm: &mut VM<'h, impl ResourceTracker>) -> RunResult<Value> {
     let this = dict.get_mut(vm);
     if this.is_empty() {
         return Err(ExcType::key_error_popitem_empty_dict());
@@ -1104,7 +1082,7 @@ impl<'de> serde::Deserialize<'de> for Dict {
 /// dict.fromkeys(['a', 'b', 'c'])  # {'a': None, 'b': None, 'c': None}
 /// dict.fromkeys(['a', 'b'], 0)    # {'a': 0, 'b': 0}
 /// ```
-pub fn dict_fromkeys(args: ArgValues, vm: &mut VM<'_, '_, impl ResourceTracker>) -> RunResult<Value> {
+pub fn dict_fromkeys(args: ArgValues, vm: &mut VM<'_, impl ResourceTracker>) -> RunResult<Value> {
     let (iterable, default) = args.get_one_two_args("dict.fromkeys", &mut vm.heap)?;
     let default = default.unwrap_or(Value::None);
     defer_drop!(default, vm);

@@ -248,26 +248,26 @@ impl HeapItem for TimeZone {
 /// `HeapRead`-based dispatch for `TimeZone`, enabling the `HeapReadOutput` enum to
 /// delegate `PyTrait` calls to heap-resident timezone objects.
 impl<'h> PyTrait<'h> for HeapRead<'h, TimeZone> {
-    fn py_type(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Type {
+    fn py_type(&self, _vm: &VM<'h, impl ResourceTracker>) -> Type {
         Type::TimeZone
     }
 
-    fn py_len(&self, _vm: &VM<'h, '_, impl ResourceTracker>) -> Option<usize> {
+    fn py_len(&self, _vm: &VM<'h, impl ResourceTracker>) -> Option<usize> {
         None
     }
 
-    fn py_eq(&self, other: &Self, vm: &mut VM<'h, '_, impl ResourceTracker>) -> Result<bool, ResourceError> {
+    fn py_eq(&self, other: &Self, vm: &mut VM<'h, impl ResourceTracker>) -> Result<bool, ResourceError> {
         Ok(self.get(vm).offset_seconds == other.get(vm).offset_seconds)
     }
 
-    fn py_bool(&self, _vm: &mut VM<'h, '_, impl ResourceTracker>) -> bool {
+    fn py_bool(&self, _vm: &mut VM<'h, impl ResourceTracker>) -> bool {
         true
     }
 
     fn py_repr_fmt(
         &self,
         f: &mut impl Write,
-        vm: &VM<'h, '_, impl ResourceTracker>,
+        vm: &VM<'h, impl ResourceTracker>,
         _heap_ids: &mut AHashSet<HeapId>,
     ) -> RunResult<()> {
         let tz = self.get(vm);
@@ -285,7 +285,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, TimeZone> {
         Ok(())
     }
 
-    fn py_str(&self, vm: &VM<'h, '_, impl ResourceTracker>) -> RunResult<Cow<'static, str>> {
+    fn py_str(&self, vm: &VM<'h, impl ResourceTracker>) -> RunResult<Cow<'static, str>> {
         let tz = self.get(vm);
         if let Some(name) = &tz.name {
             return Ok(Cow::Owned(name.clone()));

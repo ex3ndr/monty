@@ -141,3 +141,39 @@ fn smuggle_heap_read() {
 fn mutation_in_map_closure() {
     check_compile_fail("mutation_in_map_closure");
 }
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn substitute_reader() {
+    check_compile_fail("substitute_reader");
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn substitute_vm() {
+    check_compile_fail("substitute_vm");
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn smuggle_heap_read_via_vm() {
+    check_compile_fail("smuggle_heap_read_via_vm");
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn smuggle_vm() {
+    check_compile_fail("smuggle_vm");
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn substitute_reader_with_vm() {
+    check_compile_fail("substitute_reader_with_vm");
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn smuggle_and_swap_reader() {
+    check_compile_fail("smuggle_and_swap_reader");
+}

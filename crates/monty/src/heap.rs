@@ -125,14 +125,21 @@ pub(crate) struct HeapReader<'a, T: ResourceTracker> {
 impl<T: ResourceTracker> HeapReader<'_, T> {
     /// The ONLY way to get a `HeapReader`. By only providing an API which takes a closure which
     /// must be satisfied for all `'a`, it's impossible to create other `HeapReader` with the
-    /// exact same lifetime `'a`. Passing the reader by value (rather than by `&mut`) allows the
-    /// closure body to give ownership of the reader to a long-lived structure (e.g. the `VM`)
-    /// without an extra layer of indirection.
-    pub fn with<R>(heap: &mut Heap<T>, f: impl for<'a> FnOnce(HeapReader<'a, T>) -> R) -> R {
-        f(HeapReader {
-            heap: &mut *heap,
+    /// exact same lifetime `'a`.
+    ///
+    /// To allow other data to be borrowed alongside the `HeapReader`, the closure is given a
+    /// `&'a mut D` with the same lifetime as the `HeapReader`, which is forwarded from the
+    /// `&mut D` passed to this function.
+    pub fn with<R, D: ?Sized>(
+        heap: &mut Heap<T>,
+        data: &mut D,
+        f: impl for<'a> FnOnce(HeapReader<'a, T>, &'a mut D) -> R,
+    ) -> R {
+        let this = HeapReader {
+            heap,
             phantom: PhantomData,
-        })
+        };
+        f(this, data)
     }
 }
 
@@ -1018,7 +1025,7 @@ impl<T: ResourceTracker> Heap<T> {
     ///
     /// # Panics
     /// Panics if the value ID is invalid or the value has already been freed.
-    pub fn get_or_compute_hash(vm: &mut VM<'_, '_, T>, id: HeapId) -> Result<Option<u64>, ResourceError> {
+    pub fn get_or_compute_hash(vm: &mut VM<'_, T>, id: HeapId) -> Result<Option<u64>, ResourceError> {
         let entry = vm
             .heap
             .entries
@@ -1315,7 +1322,7 @@ fn longint_to_repeat_count(li: &LongInt) -> RunResult<usize> {
 fn compute_hash_from_read<'h>(
     output: HeapReadOutput<'h>,
     id: HeapId,
-    vm: &mut VM<'h, '_, impl ResourceTracker>,
+    vm: &mut VM<'h, impl ResourceTracker>,
 ) -> Result<Option<u64>, ResourceError> {
     /// Helper to get the `HeapData` discriminant for mixing into hashes.
     /// Uses a short-lived borrow on the reader.
@@ -1460,7 +1467,7 @@ fn compute_hash_from_read<'h>(
 /// and hashed directly (non-Ref values never need heap access for hashing).
 fn hash_element_at<'h, T: ResourceTracker>(
     read_element: impl for<'r> Fn(&'r HeapReader<'h, T>) -> &'r Value,
-    vm: &mut VM<'h, '_, T>,
+    vm: &mut VM<'h, T>,
 ) -> Result<Option<u64>, ResourceError> {
     let ref_id = match read_element(&vm.heap) {
         Value::Ref(id) => Some(*id),
