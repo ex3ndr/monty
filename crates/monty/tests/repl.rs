@@ -69,6 +69,45 @@ fn repl_nested_function_redefinition_updates_callers() {
     assert_eq!(feed_run_print(&mut repl, "f()").unwrap(), MontyObject::Int(42));
 }
 
+/// A later snippet's `def` for a builtin name must shadow that builtin for
+/// future calls of an earlier-defined function that references the name.
+#[test]
+fn repl_function_late_binds_user_def_over_builtin() {
+    let (mut repl, _) = init_repl("");
+    feed_run_print(&mut repl, "def call_sum():\n    return sum([1, 2, 3])").unwrap();
+    assert_eq!(
+        feed_run_print(&mut repl, "call_sum()").unwrap(),
+        MontyObject::Int(6),
+        "first call resolves via the builtin sum() fallback",
+    );
+
+    feed_run_print(&mut repl, "def sum(*args):\n    return 42").unwrap();
+    assert_eq!(
+        feed_run_print(&mut repl, "call_sum()").unwrap(),
+        MontyObject::Int(42),
+        "after `def sum`, the previously-compiled call_sum picks up the new module binding",
+    );
+}
+
+/// Similar to `repl_function_late_binds_user_def_over_builtin`, but for
+/// global variables directly.
+#[test]
+fn repl_module_scope_binds_user_def_over_builtin() {
+    let (mut repl, _) = init_repl("");
+    assert_eq!(
+        feed_run_print(&mut repl, "max(1, 2)").unwrap(),
+        MontyObject::Int(2),
+        "snippet 1: builtin max wins because nothing else is bound",
+    );
+
+    feed_run_print(&mut repl, "def max(*args):\n    return 'shadowed'").unwrap();
+    assert_eq!(
+        feed_run_print(&mut repl, "max(1, 2)").unwrap(),
+        MontyObject::String("shadowed".to_owned()),
+        "snippet 3: module-level call sees the user-defined max bound in snippet 2",
+    );
+}
+
 #[test]
 fn repl_runtime_error_keeps_partial_state_consistent() {
     let (mut repl, init_output) = init_repl("");

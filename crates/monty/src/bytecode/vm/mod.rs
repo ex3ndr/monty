@@ -23,6 +23,7 @@ use crate::{
     MontyObject,
     args::ArgValues,
     asyncio::{CallId, TaskId},
+    builtins::Builtins,
     bytecode::{
         code::{Code, LocationEntry},
         op::Opcode,
@@ -238,7 +239,7 @@ pub enum FrameExit {
         call_id: CallId,
         /// Optional bytecode IP of the load instruction that produced this `ExtFunction`.
         ///
-        /// When a `LoadGlobalCallable`/`LoadLocalCallable` opcode auto-injects an `ExtFunction`
+        /// When a `LoadGlobalCallable` opcode auto-injects an `ExtFunction`
         /// for an undefined name, the load instruction's IP is saved here. In standard execution
         /// (without external function support), this IP is used to restore the frame pointer
         /// before raising `NameError`, so the traceback points to the name rather than the call.
@@ -283,8 +284,8 @@ pub enum FrameExit {
 
     /// Execution paused for an unresolved name lookup.
     ///
-    /// When the VM encounters an `Undefined` value in a `LocalUnassigned` slot
-    /// (module level) or a global slot, it yields to the host to resolve the name.
+    /// When the VM encounters an `Undefined` value in a global slot, it yields
+    /// to the host to resolve the name.
     /// The host can return a value to cache in the slot, or indicate the name is
     /// truly undefined (which will raise `NameError`).
     ///
@@ -492,19 +493,9 @@ impl CachedFrame<'_> {
         (u16::from_le_bytes([a, b]), c)
     }
 
-    /// Fetches a `u8` followed by a little-endian `u16`, in a single bounds check.
-    ///
-    /// Mirrors the `Operand::U8U16` encoding (e.g. `LoadLocalCallable`).
-    #[inline]
-    fn fetch_u8_u16(&mut self) -> (u8, u16) {
-        let [a, b, c] = self.fetch_array();
-        (a, u16::from_le_bytes([b, c]))
-    }
-
     /// Fetches two consecutive little-endian `u16`s, in a single bounds check.
     ///
-    /// Mirrors the `Operand::U16U16` encoding (e.g. `LoadLocalCallableW`,
-    /// `LoadGlobalCallable`).
+    /// Mirrors the `Operand::U16U16` encoding (e.g. `LoadGlobalCallable`).
     #[inline]
     fn fetch_u16_u16(&mut self) -> (u16, u16) {
         let [a, b, c, d] = self.fetch_array();
@@ -674,7 +665,7 @@ pub struct VM<'h, T: ResourceTracker> {
     /// need a reference to the module code when being restored after task switching.
     module_code: Option<&'h Code>,
 
-    /// Bytecode IP of the most recent `LoadGlobalCallable`/`LoadLocalCallable` that
+    /// Bytecode IP of the most recent `LoadGlobalCallable` that
     /// pushed an `ExtFunction` for an undefined name.
     ///
     /// Used to restore the frame IP when standard execution converts an `ExternalCall`
@@ -721,7 +712,7 @@ impl<'h, T: ResourceTracker> VM<'h, T> {
             exception_stack: Vec::new(),
             instruction_ip: 0,
             scheduler: Scheduler::new(),
-            ext_function_load_ip: None, // Set by LoadGlobalCallable/LoadLocalCallable
+            ext_function_load_ip: None, // Set by LoadGlobalCallable
             module_code: None,
             json_string_cache: JsonStringCache::default(),
             pending_file_effect: None,
@@ -956,18 +947,18 @@ impl<'h, T: ResourceTracker> VM<'h, T> {
                     self.push(Value::Int(i64::from(n)));
                 }
                 // Variables - Specialized Local Loads (no operand)
-                Opcode::LoadLocal0 => handle_load_result!(self, cached_frame, self.load_local(&cached_frame, 0)),
-                Opcode::LoadLocal1 => handle_load_result!(self, cached_frame, self.load_local(&cached_frame, 1)),
-                Opcode::LoadLocal2 => handle_load_result!(self, cached_frame, self.load_local(&cached_frame, 2)),
-                Opcode::LoadLocal3 => handle_load_result!(self, cached_frame, self.load_local(&cached_frame, 3)),
+                Opcode::LoadLocal0 => try_catch_sync!(self, cached_frame, self.load_local(&cached_frame, 0)),
+                Opcode::LoadLocal1 => try_catch_sync!(self, cached_frame, self.load_local(&cached_frame, 1)),
+                Opcode::LoadLocal2 => try_catch_sync!(self, cached_frame, self.load_local(&cached_frame, 2)),
+                Opcode::LoadLocal3 => try_catch_sync!(self, cached_frame, self.load_local(&cached_frame, 3)),
                 // Variables - General Local Operations
                 Opcode::LoadLocal => {
                     let slot = u16::from(cached_frame.fetch_u8());
-                    handle_load_result!(self, cached_frame, self.load_local(&cached_frame, slot));
+                    try_catch_sync!(self, cached_frame, self.load_local(&cached_frame, slot));
                 }
                 Opcode::LoadLocalW => {
                     let slot = cached_frame.fetch_u16();
-                    handle_load_result!(self, cached_frame, self.load_local(&cached_frame, slot));
+                    try_catch_sync!(self, cached_frame, self.load_local(&cached_frame, slot));
                 }
                 Opcode::StoreLocal => {
                     let slot = u16::from(cached_frame.fetch_u8());
@@ -997,18 +988,7 @@ impl<'h, T: ResourceTracker> VM<'h, T> {
                 }
                 Opcode::DeleteGlobal => {
                     let slot = cached_frame.fetch_u16();
-                    self.delete_global(slot);
-                }
-                // Variables - Callable-context Local Loads
-                Opcode::LoadLocalCallable => {
-                    let (slot, name_idx) = cached_frame.fetch_u8_u16();
-                    let name_id = StringId::from_index(name_idx);
-                    self.load_local_callable(&cached_frame, u16::from(slot), name_id);
-                }
-                Opcode::LoadLocalCallableW => {
-                    let (slot, name_idx) = cached_frame.fetch_u16_u16();
-                    let name_id = StringId::from_index(name_idx);
-                    self.load_local_callable(&cached_frame, slot, name_id);
+                    try_catch_sync!(self, cached_frame, self.delete_global(slot));
                 }
                 // Variables - Global Operations
                 Opcode::LoadGlobal => {
@@ -1965,62 +1945,37 @@ impl<'h, T: ResourceTracker> VM<'h, T> {
 
     /// Loads a local variable and pushes it onto the stack.
     ///
-    /// For true locals (assigned somewhere in the function), returns `UnboundLocalError`
-    /// if accessed before assignment. For unassigned names (never assigned in this scope),
-    /// returns `NameLookup` to signal that the host should resolve the name.
-    ///
-    /// Returns `Ok(None)` for normal loads, `Ok(Some(FrameExit::NameLookup))` when
-    /// the host needs to resolve an unknown name, or `Err` for true unbound locals.
-    fn load_local(&mut self, cached_frame: &CachedFrame<'h>, slot: u16) -> Result<Option<FrameExit>, RunError> {
+    /// Raises `UnboundLocalError` if the slot holds `Undefined` — every reachable
+    /// `LoadLocal*` slot is registered as assigned by the compiler, so an undefined
+    /// value can only mean access-before-assignment.
+    fn load_local(&mut self, cached_frame: &CachedFrame<'h>, slot: u16) -> RunResult<()> {
         let value = &self.stack[cached_frame.stack_base + slot as usize];
 
-        // Check for undefined value — raise appropriate error based on whether
-        // this is a true local (assigned somewhere) or an undefined reference
         if matches!(value, Value::Undefined) {
             let name = cached_frame.code.local_name(slot);
-            if cached_frame.code.is_assigned_local(slot) {
-                // True local accessed before assignment
-                return Err(self.unbound_local_error(slot, name));
-            }
-            // Name doesn't exist in any scope — yield to host for resolution.
-            let name_id = name.expect("LocalUnassigned should always have a name");
-            return Ok(Some(FrameExit::NameLookup {
-                name_id,
-                namespace_slot: slot,
-                is_global: false,
-            }));
+            return Err(self.unbound_local_error(slot, name));
         }
 
         self.push(value.clone_with_heap(self));
-        Ok(None)
-    }
-
-    /// Loads a local variable in call context, pushing `ExtFunction` for undefined names.
-    ///
-    /// Unlike `load_local`, this never yields `NameLookup`. When the variable is undefined
-    /// (a `LocalUnassigned` name), it pushes `Value::ExtFunction(name_id)` so that the
-    /// subsequent `CallFunction` opcode can yield `FunctionCall` instead.
-    fn load_local_callable(&mut self, cached_frame: &CachedFrame<'h>, slot: u16, name_id: StringId) {
-        let value = &self.stack[cached_frame.stack_base + slot as usize];
-
-        if matches!(value, Value::Undefined) {
-            // LocalUnassigned in call context — push ExtFunction for the host to handle.
-            self.ext_function_load_ip = Some(self.instruction_ip);
-            self.push(Value::ExtFunction(name_id));
-        } else {
-            self.push(value.clone_with_heap(self));
-        }
+        Ok(())
     }
 
     /// Loads a global variable in call context, pushing `ExtFunction` for undefined names.
     ///
     /// Unlike `load_global`, this never yields `NameLookup`. When the variable is undefined,
     /// it pushes `Value::ExtFunction(name_id)` so that the subsequent `CallFunction` opcode
-    /// can yield `FunctionCall` instead.
+    /// can yield `FunctionCall` instead. Before doing so it tries the builtin fallback
+    /// (see [`builtin_for_name`]) so `f()` style calls into a builtin still work when
+    /// the name happens to have a module slot allocated (e.g. because the module also
+    /// `def`-binds the same name elsewhere) but that slot is currently `Undefined`.
     fn load_global_callable(&mut self, slot: u16, name_id: StringId) {
         let value = self.globals[slot as usize].clone_with_heap(self);
 
         if matches!(value, Value::Undefined) {
+            if let Some(builtin) = self.builtin_for_name(name_id) {
+                self.push(Value::Builtin(builtin));
+                return;
+            }
             // Save the load instruction's IP so NameError tracebacks point to the name
             self.ext_function_load_ip = Some(self.instruction_ip);
             self.push(Value::ExtFunction(name_id));
@@ -2036,6 +1991,29 @@ impl<'h, T: ResourceTracker> VM<'h, T> {
             None => format!("<local {slot}>"),
         };
         ExcType::unbound_local_error(&name_str).into()
+    }
+
+    /// Returns the builtin value for a name, if the name happens to match a builtin.
+    ///
+    /// Function-level global reads fall back to builtins at runtime when the module
+    /// slot is `Undefined`, mirroring CPython's `globals → builtins` lookup order.
+    /// Function-scope name resolution never substitutes `Expr::Builtin` at parse time
+    /// (see `prepare::resolve_name_or_builtin`), so this fallback is also what makes
+    /// late-binding patterns work:
+    ///
+    /// ```python
+    /// def f(): return sum(...)   # uses builtin sum
+    /// f()
+    /// def sum(*args): return 42  # later module-level shadow
+    /// f()                        # picks up the user-defined sum
+    /// ```
+    ///
+    /// The first call hits `globals[sum_slot] = Undefined` and falls back here to
+    /// the builtin; once `def sum` runs, the slot holds the user function and the
+    /// fallback isn't taken anymore.
+    fn builtin_for_name(&self, name_id: StringId) -> Option<Builtins> {
+        let name = self.interns.get_str(name_id);
+        name.parse::<Builtins>().ok()
     }
 
     /// Creates a NameError for an undefined global variable.
@@ -2064,9 +2042,9 @@ impl<'h, T: ResourceTracker> VM<'h, T> {
 
     /// Loads a global variable and pushes it onto the stack.
     ///
-    /// When the variable is undefined, yields `NameLookup` to the host for resolution
-    /// instead of immediately raising `NameError`. This allows the host to provide
-    /// external function bindings lazily.
+    /// When the variable is undefined, falls back to builtin resolution (see
+    /// [`builtin_for_name`]) before yielding `NameLookup` so the host can supply
+    /// an external binding.
     fn load_global(&mut self, slot: u16) -> Result<Option<FrameExit>, RunError> {
         let value = self.globals[slot as usize].clone_with_heap(self);
 
@@ -2074,17 +2052,14 @@ impl<'h, T: ResourceTracker> VM<'h, T> {
         if matches!(value, Value::Undefined) {
             let name = self.current_frame().code.local_name(slot);
 
-            // If the name is registered as an assigned local (e.g. a module-level
-            // variable or comprehension loop variable), raise UnboundLocalError
-            // immediately rather than yielding NameLookup.
-            if self.current_frame().code.is_assigned_local(slot) {
-                return Err(self.unbound_local_error(slot, name));
-            }
-
             let Some(name_id) = name else {
                 // No name available — raise NameError directly
                 return Err(self.name_error(slot, None));
             };
+            if let Some(builtin) = self.builtin_for_name(name_id) {
+                self.push(Value::Builtin(builtin));
+                return Ok(None);
+            }
             Ok(Some(FrameExit::NameLookup {
                 name_id,
                 namespace_slot: slot,
@@ -2103,10 +2078,19 @@ impl<'h, T: ResourceTracker> VM<'h, T> {
         old_value.drop_with_heap(self);
     }
 
-    /// Deletes a global variable (sets it to Undefined).
-    fn delete_global(&mut self, slot: u16) {
+    /// Deletes a global variable (sets it to `Undefined`).
+    ///
+    /// Raises `NameError` if the slot is already `Undefined`.
+    fn delete_global(&mut self, slot: u16) -> RunResult<()> {
+        // TODO: the `Undefined` branch is currently unreachable from Python source,
+        // needs support for the `del` statement.
+        if matches!(self.globals[slot as usize], Value::Undefined) {
+            let name = self.current_frame().code.local_name(slot);
+            return Err(self.name_error(slot, name));
+        }
         let old_value = mem::replace(&mut self.globals[slot as usize], Value::Undefined);
         old_value.drop_with_heap(self);
+        Ok(())
     }
 
     /// Loads from a closure cell and pushes onto the stack.

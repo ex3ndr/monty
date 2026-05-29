@@ -259,7 +259,7 @@ pub struct Compiler<'a> {
 
     /// Whether the compiler is currently compiling module-level code.
     ///
-    /// At module level, `Local` and `LocalUnassigned` scopes map to global opcodes
+    /// At module level, `Local` scope maps to global opcodes
     /// (`LoadGlobal`/`StoreGlobal`/`DeleteGlobal`) because module locals live in the
     /// globals array. In function bodies this is `false` and these scopes use local
     /// opcodes that index into the stack.
@@ -271,12 +271,6 @@ pub struct Compiler<'a> {
     ///   free vars + assigned locals).
     /// - Module scope: `0` — module-level "locals" live in `self.globals`, so
     ///   nothing is stored in the frame's locals region.
-    ///
-    /// Comp-var loads/stores are emitted as `LoadLocal/W` / `StoreLocal/W` with
-    /// the slot operand set to `frame_locals + offset`, where `offset` is the
-    /// comp-var's absolute operand-stack offset. At runtime, the local opcodes
-    /// access `stack[stack_base + slot]`; with `frame_locals` chosen to match
-    /// the runtime `locals_count`, this resolves correctly in both scopes.
     frame_locals: u16,
 
     /// Operand-stack offsets for comp-var slot IDs currently in scope.
@@ -1205,23 +1199,13 @@ impl<'a> Compiler<'a> {
 
     /// Compiles loading a variable onto the stack.
     ///
-    /// At module level, `Local` and `LocalUnassigned` scopes emit global opcodes
+    /// At module level, `Local` scopes emits global opcodes
     /// because module-level locals live in the globals array.
     fn compile_name(&mut self, ident: &Identifier) -> Result<(), CompileError> {
         let slot = ident.namespace_id().as_u16();
         match ident.scope {
             NameScope::Local => {
                 // True local - register name and mark as assigned for UnboundLocalError
-                self.code.register_local_name(slot, ident.name_id);
-                self.code.register_assigned_local(slot);
-                if self.is_module_scope {
-                    self.code.emit_u16(Opcode::LoadGlobal, slot)
-                } else {
-                    self.code.emit_load_local(slot)
-                }
-            }
-            NameScope::LocalUnassigned => {
-                // Undefined reference - register name but NOT as assigned for NameError
                 self.code.register_local_name(slot, ident.name_id);
                 if self.is_module_scope {
                     self.code.emit_u16(Opcode::LoadGlobal, slot)
@@ -1268,31 +1252,21 @@ impl<'a> Compiler<'a> {
 
     /// Compiles loading a variable in call context (e.g., `foo()` loads `foo`).
     ///
-    /// For `LocalUnassigned` and `Global` scopes, emits callable-aware load opcodes
-    /// that push `ExtFunction(name_id)` for undefined names instead of yielding
+    /// For `Global` scope, emits a callable-aware load opcode that pushes
+    /// `ExtFunction(name_id)` for undefined names instead of yielding
     /// `NameLookup`. This allows execution to reach `CallFunction`, which naturally
     /// yields `FunctionCall` — giving the host a chance to handle external function calls.
     ///
     /// For `Local` and `Cell` scopes, delegates to `compile_name` since those can't
     /// be external functions (they're always defined locally or captured).
     fn compile_name_callable(&mut self, ident: &Identifier) -> Result<(), CompileError> {
-        let slot = ident.namespace_id().as_u16();
         match ident.scope {
-            NameScope::LocalUnassigned => {
-                // Undefined reference in call context - use callable-aware load.
-                // At module level, use global callable since locals are in the globals array.
-                self.code.register_local_name(slot, ident.name_id);
-                if self.is_module_scope {
-                    self.code.emit_load_global_callable(slot, ident.name_id)
-                } else {
-                    self.code.emit_load_local_callable(slot, ident.name_id)
-                }
-            }
             NameScope::Global => {
                 // Global scope - name_id is encoded in the operand because global slot
                 // indices are in a different namespace from local slots, so looking up
                 // the name from the current frame's local_names would be incorrect
-                self.code.emit_load_global_callable(slot, ident.name_id)
+                self.code
+                    .emit_load_global_callable(ident.namespace_id().as_u16(), ident.name_id)
             }
             // Local, Cell, and CompVar can't be external functions - use regular load
             NameScope::Local | NameScope::Cell | NameScope::CompVar => self.compile_name(ident),
@@ -1301,12 +1275,12 @@ impl<'a> Compiler<'a> {
 
     /// Compiles storing the top of stack to a variable.
     ///
-    /// At module level, `Local` and `LocalUnassigned` scopes emit `StoreGlobal`
+    /// At module level, `Local` scope emits `StoreGlobal`
     /// because module-level locals live in the globals array.
     fn compile_store(&mut self, target: &Identifier) -> Result<(), CompileError> {
         let slot = target.namespace_id().as_u16();
         match target.scope {
-            NameScope::Local | NameScope::LocalUnassigned => {
+            NameScope::Local => {
                 self.code.register_local_name(slot, target.name_id);
                 if self.is_module_scope {
                     self.code.emit_u16(Opcode::StoreGlobal, slot)
@@ -1324,11 +1298,7 @@ impl<'a> Compiler<'a> {
                 // handled by `compile_comp_target_unpack`, which leaves the
                 // value on the operand stack as the natural result of
                 // `FOR_ITER` (and any subsequent `UNPACK_SEQUENCE` /
-                // `LIFT_TO_TOP` for nested tuples). The non-comp store paths
-                // (`compile_assign_target`, walrus via
-                // `get_id_for_store_target`, etc.) resolve their targets to
-                // `Local`/`Global`/`Cell` — never `CompVar` — so reaching
-                // here means a compile-flow bug.
+                // `LIFT_TO_TOP` for nested tuples).
                 unreachable!(
                     "compile_store called with NameScope::CompVar — comp targets are stored via compile_comp_target_unpack"
                 )
@@ -3724,7 +3694,7 @@ impl<'a> Compiler<'a> {
 
     /// Compiles deletion of a variable.
     ///
-    /// At module level, `Local` and `LocalUnassigned` scopes emit `DeleteGlobal`
+    /// At module level, `Local` scope emits `DeleteGlobal`
     /// because module-level locals live in the globals array.
     ///
     /// Function-scope `Local` deletes are limited to the first 256 slots
@@ -3737,7 +3707,7 @@ impl<'a> Compiler<'a> {
     fn compile_delete(&mut self, target: &Identifier) -> Result<(), CompileError> {
         let slot = target.namespace_id().as_u16();
         match target.scope {
-            NameScope::Local | NameScope::LocalUnassigned => {
+            NameScope::Local => {
                 if self.is_module_scope {
                     self.code.emit_u16(Opcode::DeleteGlobal, slot)?;
                 } else if let Ok(s) = u8::try_from(slot) {
@@ -3762,12 +3732,7 @@ impl<'a> Compiler<'a> {
                 self.compile_store(target)?;
             }
             NameScope::CompVar => {
-                // Comprehension targets only appear as generator targets
-                // inside inlined comprehensions; the parser does not surface
-                // a `del` target with `CompVar` scope (there is no syntax
-                // for `del x` on a comp target). Reaching here means a
-                // compile-flow bug.
-                unreachable!("compile_delete called with NameScope::CompVar — no Python syntax produces this")
+                unreachable!("no syntax exists to `del` a comprehension variable")
             }
         }
         Ok(())

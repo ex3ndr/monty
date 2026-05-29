@@ -24,12 +24,7 @@ pub enum NameScope {
     /// If accessed before assignment, raises `UnboundLocalError`.
     #[default]
     Local,
-    /// Variable reference that doesn't exist in any scope.
-    ///
-    /// A local slot is allocated but never assigned. Accessing raises `NameError`
-    /// (not `UnboundLocalError`) because the name was never defined anywhere.
-    LocalUnassigned,
-    /// Variable is in the module-level global namespace
+    /// Variable is in the module-level global namespace.
     Global,
     /// Variable accessed through a cell (heap-allocated container).
     ///

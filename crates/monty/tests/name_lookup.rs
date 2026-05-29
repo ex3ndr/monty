@@ -250,6 +250,34 @@ fn resolved_constant_is_cached() {
     assert_eq!(lookup_count, 1, "constant should be cached after first lookup");
 }
 
+#[test]
+fn name_lookup_caches_across_calls() {
+    let code = "def f():
+    return mystery
+f()
+f()"
+    .to_owned();
+    let runner = MontyRun::new(code, "test.py", vec![]).unwrap();
+    let mut progress = runner.start(vec![], NoLimitTracker, PrintWriter::Stdout).unwrap();
+
+    let mut lookup_count = 0;
+    loop {
+        match progress {
+            RunProgress::NameLookup(lookup) => {
+                assert_eq!(lookup.name, "mystery");
+                lookup_count += 1;
+                progress = lookup.resume(MontyObject::Int(7), PrintWriter::Stdout).unwrap();
+            }
+            RunProgress::Complete(_) => break,
+            other => panic!("unexpected progress: {other:?}"),
+        }
+    }
+    assert_eq!(
+        lookup_count, 1,
+        "first resolution caches into the slot; second call reads it"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Multiple names
 // ---------------------------------------------------------------------------

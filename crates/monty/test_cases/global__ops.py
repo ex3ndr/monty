@@ -161,3 +161,82 @@ def shadow_unchanged():
 
 assert shadow_unchanged() == 99, 'shadowing returns local'
 assert x7 == 10, 'global unchanged after shadowing'
+
+
+# === `global X` for a name that doesn't yet exist at module level ===
+
+
+def declare_then_write():
+    global ghost1
+    ghost1 = 5
+
+
+declare_then_write()
+assert ghost1 == 5, 'global declaration then write makes name visible at module level'
+
+
+def declare_then_read():
+    global ghost2
+    return ghost2
+
+
+try:
+    declare_then_read()
+    raise AssertionError('expected NameError for never-assigned global')
+except NameError as exc:
+    assert str(exc) == "name 'ghost2' is not defined", 'NameError message for unassigned global'
+
+
+# === Forward reference to a later module-level binding ===
+
+
+def read_late_value():
+    return late_value
+
+
+late_value = 'bound'
+assert read_late_value() == 'bound', 'function sees later module-level binding'
+
+
+# === Late binding overrides parse-time builtin resolution ===
+
+
+def call_min():
+    return min([3, 1, 2])
+
+
+assert call_min() == 1, 'first call resolves to builtin min'
+
+
+def min(*args):
+    return 'shadowed'
+
+
+assert call_min() == 'shadowed', 'second call resolves to user-defined min'
+
+
+# === Module-scope shadowing builtins ===
+
+assert max(1, 2) == 2, 'pre-binding: module-scope max resolves to builtin'
+
+
+def max(*args):
+    return 'shadowed-max'
+
+
+assert max(1, 2) == 'shadowed-max', 'post-binding: module-scope max sees user-defined version'
+
+
+# === Deeply nested `global X` ===
+
+
+def deep_outer():
+    def deep_inner():
+        global deep_x
+        deep_x = 'reached-module'
+
+    deep_inner()
+
+
+deep_outer()
+assert deep_x == 'reached-module', 'global X bubbles up from doubly-nested function'

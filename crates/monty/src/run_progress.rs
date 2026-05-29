@@ -358,17 +358,16 @@ impl<T: ResourceTracker> NameLookup<T> {
                             .map_err(|e| MontyException::runtime_error(format!("invalid name lookup result: {e}")))?;
 
                         // Cache the resolved value in the appropriate slot
-                        let slot = namespace_slot as usize;
-                        if is_global {
-                            let cloned = value.clone_with_heap(&vm);
-                            let old = mem::replace(&mut vm.globals[slot], cloned);
-                            old.drop_with_heap(&mut vm);
+                        let slot_idx = namespace_slot as usize;
+                        let cloned = value.clone_with_heap(&vm);
+                        let slot = if is_global {
+                            &mut vm.globals[slot_idx]
                         } else {
                             let stack_base = vm.current_stack_base();
-                            let cloned = value.clone_with_heap(&vm);
-                            let old = mem::replace(&mut vm.stack[stack_base + slot], cloned);
-                            old.drop_with_heap(&mut vm);
-                        }
+                            &mut vm.stack[stack_base + slot_idx]
+                        };
+                        let old = mem::replace(slot, cloned);
+                        old.drop_with_heap(&mut vm);
 
                         vm.push(value);
                         vm.run()

@@ -1,11 +1,11 @@
-# Test that accessing a variable before assignment at module level raises NameError
-# (Unlike function scope, module level doesn't pre-scan for assignments)
+# Read-before-write at module scope must raise `NameError`, not `UnboundLocalError`.
 print(x)
 x = 1
+print(x)
 """
 TRACEBACK:
 Traceback (most recent call last):
-  File "name_error__unbound_local_module.py", line 3, in <module>
+  File "name_error__unbound_local_module.py", line 2, in <module>
     print(x)
           ~
 NameError: name 'x' is not defined
