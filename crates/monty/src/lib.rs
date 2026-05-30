@@ -60,5 +60,5 @@ pub use crate::{
     run_progress::{
         ExtFunctionResult, FunctionCall, NameLookup, NameLookupResult, OsCall, ResolveFutures, RunProgress,
     },
-    types::{file::FileMode, str::StringRepr},
+    types::{file::FileMode, str::StringRepr, r#type::Type},
 };

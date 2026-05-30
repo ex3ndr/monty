@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 
-use ::monty::{FileMode, MontyDate, MontyDateTime, MontyFileHandle, MontyObject, MontyTimeDelta, MontyTimeZone};
+use ::monty::{FileMode, MontyDate, MontyDateTime, MontyFileHandle, MontyObject, MontyTimeDelta, MontyTimeZone, Type};
 use monty::{MontyException, StringRepr};
 use num_bigint::BigInt;
 use pyo3::{
@@ -16,7 +16,7 @@ use pyo3::{
     sync::PyOnceLock,
     types::{
         PyBool, PyBytes, PyDate, PyDateAccess, PyDateTime, PyDelta, PyDeltaAccess, PyDict, PyFloat, PyFrozenSet, PyInt,
-        PyList, PyModule, PySet, PyString, PyTimeAccess, PyTuple, PyTzInfo, PyTzInfoAccess,
+        PyList, PyModule, PySet, PyString, PyTimeAccess, PyTuple, PyType, PyTzInfo, PyTzInfoAccess,
     },
 };
 
@@ -165,12 +165,19 @@ pub fn py_to_monty(obj: &Bound<'_, PyAny>, dc_registry: &DcRegistry, mut depth: 
         // Round-trip a `MontyFileHandle` returned from Python (e.g. as the
         // result of an `Open` OS callback) back into `MontyObject::FileHandle`.
         Ok(MontyObject::FileHandle(handle.borrow().0.clone()))
+    } else if let Ok(ty) = obj.cast::<PyType>() {
+        // A class is callable, so it would otherwise fall into the generic callable
+        // branch below. Classes Monty models are preserved as type objects (so they
+        // round-trip and `isinstance` works in the sandbox); any other host class has
+        // no Monty `Type`, so it falls back to the callable representation.
+        match py_type_object_to_monty(ty)? {
+            Some(t) => Ok(MontyObject::Type(t)),
+            None => Ok(callable_to_monty_function(obj)),
+        }
     } else if obj.is_callable() {
         // Callable check is last since many Python types (classes, etc.) are technically callable,
         // and we want to match more specific types first (e.g. dataclasses).
-        let name = get_name(obj);
-        let docstring = get_docstring(obj);
-        Ok(MontyObject::Function { name, docstring })
+        Ok(callable_to_monty_function(obj))
     } else if let Ok(name) = obj.get_type().qualname() {
         let msg = match obj.get_type().module() {
             Ok(module) => format!("Cannot convert {module}.{name} to Monty value"),
@@ -179,6 +186,77 @@ pub fn py_to_monty(obj: &Bound<'_, PyAny>, dc_registry: &DcRegistry, mut depth: 
         Err(PyTypeError::new_err(msg))
     } else {
         Err(PyTypeError::new_err("Cannot convert unknown type to Monty value"))
+    }
+}
+
+/// Inverse of [`type_object_to_py`]: maps a host class passed *into* the sandbox
+/// to the Monty [`Type`] it represents, so it round-trips instead of degrading to
+/// a callable. Matches by type-object **identity**, not `__module__`/`__name__` —
+/// the latter is spoofable and churns across Python versions (e.g. `pathlib` paths
+/// report `pathlib._local` on 3.13). Every `pathlib` path class collapses to
+/// [`Type::Path`]. Returns `None` for classes Monty does not model, which the
+/// caller then represents as a [`MontyObject::Function`].
+fn py_type_object_to_monty(ty: &Bound<'_, PyType>) -> PyResult<Option<Type>> {
+    let py = ty.py();
+    for (obj, t) in round_trip_type_table(py)? {
+        if ty.is(obj) {
+            return Ok(Some(*t));
+        }
+    }
+    // pathlib's concrete path classes (PurePath, PosixPath, …) all subclass
+    // PurePath and collapse to one Monty path type.
+    Ok(ty.is_subclass(get_pure_path(py)?)?.then_some(Type::Path))
+}
+
+/// Host type objects that round-trip into the sandbox, each paired with its Monty
+/// [`Type`]. Built once and cached. Identities are taken from [`type_object_to_py`]
+/// so the two directions stay in lock-step. [`Type::Path`] is handled separately
+/// (by subclass check) since pathlib exposes several concrete path classes.
+fn round_trip_type_table(py: Python<'_>) -> PyResult<&'static Vec<(Py<PyAny>, Type)>> {
+    static TABLE: PyOnceLock<Vec<(Py<PyAny>, Type)>> = PyOnceLock::new();
+    TABLE.get_or_try_init(py, || {
+        [
+            Type::NoneType,
+            Type::Ellipsis,
+            Type::Bool,
+            Type::Int,
+            Type::Float,
+            Type::Str,
+            Type::Bytes,
+            Type::List,
+            Type::Tuple,
+            Type::Dict,
+            Type::Set,
+            Type::FrozenSet,
+            Type::Range,
+            Type::Slice,
+            Type::Type,
+            Type::Property,
+            Type::Date,
+            Type::DateTime,
+            Type::TimeDelta,
+            Type::TimeZone,
+            Type::RePattern,
+            Type::ReMatch,
+            Type::TextIOWrapper,
+            Type::BufferedReader,
+            Type::BufferedWriter,
+            Type::BufferedRandom,
+            Type::SpecialForm,
+        ]
+        .into_iter()
+        .map(|t| Ok((type_object_to_py(py, t)?, t)))
+        .collect()
+    })
+}
+
+/// Represents a host callable with no richer Monty mapping as a
+/// [`MontyObject::Function`], carrying its `__name__` and docstring. Used for
+/// plain callables and for host classes Monty does not model.
+fn callable_to_monty_function(obj: &Bound<'_, PyAny>) -> MontyObject {
+    MontyObject::Function {
+        name: get_name(obj),
+        docstring: get_docstring(obj),
     }
 }
 
@@ -304,8 +382,8 @@ pub(crate) fn monty_to_py_inner(
             .map(Bound::into_any)
             .map(Bound::unbind),
         MontyObject::TimeZone(timezone) => monty_timezone_to_py(py, timezone),
-        // Return Python's built-in type object
-        MontyObject::Type(t) => import_builtins(py)?.getattr(py, t.to_string()),
+        // Return the host Python type object the sandbox type maps to.
+        MontyObject::Type(t) => type_object_to_py(py, *t),
         MontyObject::BuiltinFunction(f) => import_builtins(py)?.getattr(py, f.to_string()),
         // Dataclass - use registry to reconstruct original type if available
         MontyObject::Dataclass {
@@ -339,6 +417,46 @@ pub fn import_builtins(py: Python<'_>) -> PyResult<&Py<PyModule>> {
     static BUILTINS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 
     BUILTINS.get_or_try_init(py, || py.import("builtins").map(Bound::unbind))
+}
+
+/// Reconstructs the host Python *type object* for a Monty [`Type`] crossing the
+/// boundary as a value (e.g. sandbox code passing `type(Path('/x'))` to a host call).
+///
+/// Genuine builtins resolve from `builtins`; modeled stdlib types resolve from their
+/// real defining module (the `Path` class maps to `PurePosixPath`, like its instances).
+/// The import path can differ from [`Type`]'s `Display` (io types show `_io.*` but live
+/// in `io`). Unmodeled types fall through to `builtins` and raise `AttributeError`.
+/// Each modeled type's host class is cached in its own `PyOnceLock` (imported once).
+fn type_object_to_py(py: Python<'_>, t: Type) -> PyResult<Py<PyAny>> {
+    // Each expansion gets a distinct hygienic `LOCK` static, so every arm caches
+    // its own resolved type object. `PyOnceLock::import` imports + getattrs once.
+    macro_rules! cached {
+        ($module:literal, $name:literal) => {{
+            static LOCK: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+            LOCK.import(py, $module, $name).map(|b| b.clone().unbind())
+        }};
+    }
+    match t {
+        Type::Date => cached!("datetime", "date"),
+        Type::DateTime => cached!("datetime", "datetime"),
+        Type::TimeDelta => cached!("datetime", "timedelta"),
+        Type::TimeZone => cached!("datetime", "timezone"),
+        // Consistent with the Path *instance* arm, which marshals as PurePosixPath
+        // and is instantiable on every host OS (unlike PosixPath on Windows).
+        Type::Path => get_pure_posix_path(py).map(|b| b.clone().unbind()),
+        Type::RePattern => cached!("re", "Pattern"),
+        Type::ReMatch => cached!("re", "Match"),
+        Type::TextIOWrapper => cached!("io", "TextIOWrapper"),
+        Type::BufferedReader => cached!("io", "BufferedReader"),
+        Type::BufferedWriter => cached!("io", "BufferedWriter"),
+        Type::BufferedRandom => cached!("io", "BufferedRandom"),
+        Type::SpecialForm => cached!("typing", "_SpecialForm"),
+        // `NoneType` and `ellipsis` aren't `builtins` attributes; take them from
+        // the singletons (`type(None)` / `type(...)`).
+        Type::NoneType => Ok(py.None().bind(py).get_type().into_any().unbind()),
+        Type::Ellipsis => Ok(py.Ellipsis().bind(py).get_type().into_any().unbind()),
+        _ => import_builtins(py)?.getattr(py, t.to_string()),
+    }
 }
 
 /// Converts a native Python `datetime.timedelta` to Monty's carrier representation.
@@ -534,6 +652,14 @@ fn get_pure_posix_path(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static PUREPOSIX: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
     PUREPOSIX.import(py, "pathlib", "PurePosixPath")
+}
+
+/// Cached import of `pathlib.PurePath` — the common base of every path class,
+/// used to recognise any path type passed into the sandbox.
+fn get_pure_path(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static PUREPATH: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+    PUREPATH.import(py, "pathlib", "PurePath")
 }
 
 /// Host-side mirror of [`MontyObject::FileHandle`].
