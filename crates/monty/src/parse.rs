@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, fmt, mem};
 
 use num_bigint::BigInt;
 use num_traits::Num;
@@ -344,30 +344,26 @@ impl<'a> Parser<'a> {
                 let op = convert_op(op);
                 let value = self.parse_expression(*value)?;
                 match *target {
-                    AstExpr::Subscript(ast::ExprSubscript {
-                        value: object,
-                        slice,
-                        range,
-                        ..
-                    }) => Ok(Node::SubscriptOpAssign {
-                        target: self.parse_expression(*object)?,
-                        index: self.parse_expression(*slice)?,
-                        op,
-                        value,
-                        target_position: self.convert_range(range),
-                    }),
-                    AstExpr::Attribute(ast::ExprAttribute {
-                        value: object,
-                        attr,
-                        range,
-                        ..
-                    }) => Ok(Node::AttrOpAssign {
-                        object: self.parse_expression(*object)?,
-                        attr: EitherStr::Interned(self.interner.intern(attr.id())),
-                        op,
-                        value,
-                        target_position: self.convert_range(range),
-                    }),
+                    AstExpr::Subscript(subscript) => {
+                        let (object, slice, range) = deconstruct_subscript(subscript);
+                        Ok(Node::SubscriptOpAssign {
+                            target: self.parse_expression(*object)?,
+                            index: self.parse_expression(*slice)?,
+                            op,
+                            value,
+                            target_position: self.convert_range(range),
+                        })
+                    }
+                    AstExpr::Attribute(attribute) => {
+                        let (object, attr, range) = deconstruct_attribute(attribute);
+                        Ok(Node::AttrOpAssign {
+                            object: self.parse_expression(*object)?,
+                            attr: EitherStr::Interned(self.interner.intern(attr.id())),
+                            op,
+                            value,
+                            target_position: self.convert_range(range),
+                        })
+                    }
                     other => Ok(Node::OpAssign {
                         target: self.parse_identifier(other)?,
                         op,
@@ -711,18 +707,22 @@ impl<'a> Parser<'a> {
     /// its downstream consumers (prepare and compiler).
     fn parse_assign_target(&mut self, lhs: AstExpr) -> Result<AssignTarget, ParseError> {
         match lhs {
-            AstExpr::Subscript(ast::ExprSubscript {
-                value, slice, range, ..
-            }) => Ok(AssignTarget::Subscript {
-                target: self.parse_expression(*value)?,
-                index: self.parse_expression(*slice)?,
-                target_position: self.convert_range(range),
-            }),
-            AstExpr::Attribute(ast::ExprAttribute { value, attr, range, .. }) => Ok(AssignTarget::Attr {
-                object: self.parse_expression(*value)?,
-                attr: EitherStr::Interned(self.interner.intern(attr.id())),
-                target_position: self.convert_range(range),
-            }),
+            AstExpr::Subscript(subscript) => {
+                let (value, slice, range) = deconstruct_subscript(subscript);
+                Ok(AssignTarget::Subscript {
+                    target: self.parse_expression(*value)?,
+                    index: self.parse_expression(*slice)?,
+                    target_position: self.convert_range(range),
+                })
+            }
+            AstExpr::Attribute(attribute) => {
+                let (value, attr, range) = deconstruct_attribute(attribute);
+                Ok(AssignTarget::Attr {
+                    object: self.parse_expression(*value)?,
+                    attr: EitherStr::Interned(self.interner.intern(attr.id())),
+                    target_position: self.convert_range(range),
+                })
+            }
             AstExpr::Tuple(ast::ExprTuple { elts, range, .. }) => {
                 let targets_position = self.convert_range(range);
                 let targets = elts
@@ -811,18 +811,19 @@ impl<'a> Parser<'a> {
                     },
                 ))
             }
-            AstExpr::BinOp(ast::ExprBinOp {
-                left, op, right, range, ..
-            }) => {
+            AstExpr::BinOp(mut bin_op) => {
+                // `ExprBinOp` carries a manual `Drop` impl (see `placeholder_expr`), so its
+                // `left`/`right` edges must be vacated via `mem::replace` rather than moved out.
+                let op = convert_op(bin_op.op);
+                let range = bin_op.range;
+                let left = mem::replace(&mut bin_op.left, Box::new(placeholder_expr()));
+                let right = mem::replace(&mut bin_op.right, Box::new(placeholder_expr()));
+
                 let left = Box::new(self.parse_expression(*left)?);
                 let right = Box::new(self.parse_expression(*right)?);
                 Ok(ExprLoc {
                     position: self.convert_range(range),
-                    expr: Expr::Op {
-                        left,
-                        op: convert_op(op),
-                        right,
-                    },
+                    expr: Expr::Op { left, op, right },
                 })
             }
             AstExpr::UnaryOp(ast::ExprUnaryOp { op, operand, range, .. }) => match op {
@@ -1030,10 +1031,13 @@ impl<'a> Parser<'a> {
                 // Chain comparison: transform to nested And expressions
                 self.parse_chain_comparison(*left, ops_vec, comparators_vec, position)
             }
-            AstExpr::Call(ast::ExprCall {
-                func, arguments, range, ..
-            }) => {
-                let position = self.convert_range(range);
+            AstExpr::Call(mut call) => {
+                // `ExprCall` carries a manual `Drop` impl (see `placeholder_expr`), so its
+                // owned fields must be vacated via `mem::replace` rather than moved out.
+                let position = self.convert_range(call.range);
+                let func = mem::replace(&mut call.func, Box::new(placeholder_expr()));
+                let arguments = mem::replace(&mut call.arguments, placeholder_arguments());
+
                 let ast::Arguments { args, keywords, .. } = arguments;
                 let args_vec = args.into_vec();
                 let keywords_vec = keywords.into_vec();
@@ -1064,7 +1068,8 @@ impl<'a> Parser<'a> {
                             },
                         ))
                     }
-                    AstExpr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
+                    AstExpr::Attribute(attribute) => {
+                        let (value, attr, _) = deconstruct_attribute(attribute);
                         let object = Box::new(self.parse_expression(*value)?);
                         Ok(ExprLoc::new(
                             position,
@@ -1138,7 +1143,8 @@ impl<'a> Parser<'a> {
                 self.convert_range(range),
                 Expr::Literal(Literal::Ellipsis),
             )),
-            AstExpr::Attribute(ast::ExprAttribute { value, attr, range, .. }) => {
+            AstExpr::Attribute(attribute) => {
+                let (value, attr, range) = deconstruct_attribute(attribute);
                 let object = Box::new(self.parse_expression(*value)?);
                 let position = self.convert_range(range);
                 Ok(ExprLoc::new(
@@ -1149,9 +1155,8 @@ impl<'a> Parser<'a> {
                     },
                 ))
             }
-            AstExpr::Subscript(ast::ExprSubscript {
-                value, slice, range, ..
-            }) => {
+            AstExpr::Subscript(subscript) => {
+                let (value, slice, range) = deconstruct_subscript(subscript);
                 let object = Box::new(self.parse_expression(*value)?);
                 let index = Box::new(self.parse_expression(*slice)?);
                 Ok(ExprLoc::new(
@@ -1671,6 +1676,38 @@ impl<'a> Parser<'a> {
             let position = self.convert_range(get_range());
             Err(ParseError::syntax("Source is too deeply nested", position))
         }
+    }
+}
+
+/// Move the owned parts out of an [`ast::ExprSubscript`]; see [`placeholder_expr`].
+fn deconstruct_subscript(mut node: ast::ExprSubscript) -> (Box<AstExpr>, Box<AstExpr>, TextRange) {
+    let value = mem::replace(&mut node.value, Box::new(placeholder_expr()));
+    let slice = mem::replace(&mut node.slice, Box::new(placeholder_expr()));
+    (value, slice, node.range)
+}
+
+/// Move the owned parts out of an [`ast::ExprAttribute`]; see [`placeholder_expr`].
+fn deconstruct_attribute(mut node: ast::ExprAttribute) -> (Box<AstExpr>, ast::Identifier, TextRange) {
+    let value = mem::replace(&mut node.value, Box::new(placeholder_expr()));
+    let attr = mem::replace(&mut node.attr, ast::Identifier::new("", TextRange::default()));
+    (value, attr, node.range)
+}
+
+/// A trivial owned expression used to sever an owned `Box<Expr>` edge of a
+/// "spine" node (`BinOp`/`Call`/`Subscript`/`Attribute`) before that node is
+/// dropped.
+fn placeholder_expr() -> AstExpr {
+    AstExpr::NoneLiteral(ast::ExprNoneLiteral::default())
+}
+
+/// Empty placeholder [`ast::Arguments`] used to vacate the `arguments` field of
+/// an [`ast::ExprCall`] husk; see [`placeholder_expr`].
+fn placeholder_arguments() -> ast::Arguments {
+    ast::Arguments {
+        range: TextRange::default(),
+        node_index: ast::AtomicNodeIndex::default(),
+        args: Box::default(),
+        keywords: Box::default(),
     }
 }
 

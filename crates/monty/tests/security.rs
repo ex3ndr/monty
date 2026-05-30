@@ -33,3 +33,17 @@ fn deeply_nested_attribute_access_does_not_stack_overflow() {
     let err = result.expect_err("expected parse error for deeply nested attribute access");
     assert_snapshot!(err.message().unwrap_or(""), @"Source is too deeply nested");
 }
+
+#[test]
+fn many_plus() {
+    // '1+' * 15_000 + '1'
+    let depth = 100_000;
+    let mut code = String::with_capacity(depth * 2 + 1);
+    for _ in 0..depth {
+        code.push_str("1+");
+    }
+    code.push('1');
+    let result = MontyRun::new(code, "test.py", vec![]);
+    let err = result.expect_err("expected parse error for deeply nested attribute access");
+    assert_snapshot!(err.message().unwrap_or(""), @"Source is too deeply nested");
+}
