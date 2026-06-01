@@ -43,12 +43,18 @@
 //! console.log('Final result:', progress.output);
 //! ```
 
-use std::{borrow::Cow, fmt::Write, mem, ptr, result};
+use std::{
+    borrow::Cow,
+    fmt::Write,
+    mem, ptr, result,
+    sync::{Arc, Mutex},
+};
 
 use monty::{
     fs::MountTable, ExcType, ExtFunctionResult, FunctionCall, LimitedTracker, MontyException, MontyObject,
     MontyRepl as CoreMontyRepl, MontyRun, NameLookup, NameLookupResult, NoLimitTracker, OsCall, PrintWriter,
-    PrintWriterCallback, ReplProgress, ResourceTracker, RunProgress,
+    PrintWriterCallback, ReplFunctionCall, ReplNameLookup, ReplOsCall, ReplProgress, ReplStartError, ResourceTracker,
+    RunProgress,
 };
 use monty_type_checking::{type_check, SourceFile};
 use napi::{bindgen_prelude::*, sys::Status};
@@ -125,6 +131,8 @@ pub struct StartOptions<'env> {
     /// Filesystem mount(s) for the sandbox.
     /// A single `MountDir` or an array of `MountDir`.
     pub mount: Option<Object<'env>>,
+    /// Pause and return OS calls not handled by native mounts.
+    pub pause_os_calls: Option<bool>,
 }
 
 #[napi]
@@ -362,9 +370,10 @@ impl Monty {
         &self,
         env: &'env Env,
         options: Option<StartOptions<'env>>,
-    ) -> Result<Either4<MontySnapshot, MontyNameLookup, MontyComplete, JsMontyException>> {
+    ) -> Result<Either5<MontySnapshot, MontyNameLookup, MontyComplete, MontyOsCall, JsMontyException>> {
         let options = options.unwrap_or_default();
         let input_values = self.extract_input_values(options.inputs, *env)?;
+        let pause_os_calls = options.pause_os_calls.unwrap_or(false);
 
         // Build the mount handler from the mount parameter
         let os_handler = match options.mount.as_ref() {
@@ -401,20 +410,34 @@ impl Monty {
                 Ok(p) => p,
                 Err(exc) => {
                     put_back_mount_state(mount_state);
-                    return Ok(Either4::D(JsMontyException::new(exc)));
+                    return Ok(Either5::E(JsMontyException::new(exc)));
                 }
             };
-            progress_to_result_with_mounts(env, progress, print_callback_ref, self.script_name(), mount_state)
+            progress_to_result_with_mounts(
+                env,
+                progress,
+                print_callback_ref,
+                self.script_name(),
+                mount_state,
+                pause_os_calls,
+            )
         } else {
             let tracker = NoLimitTracker;
             let progress = match runner.start(input_values, tracker, print_writer) {
                 Ok(p) => p,
                 Err(exc) => {
                     put_back_mount_state(mount_state);
-                    return Ok(Either4::D(JsMontyException::new(exc)));
+                    return Ok(Either5::E(JsMontyException::new(exc)));
                 }
             };
-            progress_to_result_with_mounts(env, progress, print_callback_ref, self.script_name(), mount_state)
+            progress_to_result_with_mounts(
+                env,
+                progress,
+                print_callback_ref,
+                self.script_name(),
+                mount_state,
+                pause_os_calls,
+            )
         }
     }
 
@@ -518,6 +541,8 @@ enum EitherRepl {
     Limited(CoreMontyRepl<LimitedTracker>),
 }
 
+type SharedRepl = Arc<Mutex<Option<EitherRepl>>>;
+
 /// Options for creating a new `MontyRepl` instance.
 ///
 /// Controls the script name shown in tracebacks and optional resource limits
@@ -535,9 +560,13 @@ pub struct MontyReplOptions {
 #[napi(object)]
 #[derive(Default)]
 pub struct FeedOptions<'env> {
+    /// Optional print callback function.
+    pub print_callback: Option<JsPrintCallback<'env>>,
     /// Filesystem mount(s) for the sandbox.
     /// A single `MountDir` or an array of `MountDir`.
     pub mount: Option<Object<'env>>,
+    /// Pause and return OS calls not handled by native mounts.
+    pub pause_os_calls: Option<bool>,
 }
 
 /// Stateful no-replay REPL session.
@@ -546,7 +575,7 @@ pub struct FeedOptions<'env> {
 /// incrementally against persistent heap and namespace state.
 #[napi]
 pub struct MontyRepl {
-    repl: Option<EitherRepl>,
+    repl: SharedRepl,
     script_name: String,
 }
 
@@ -571,7 +600,7 @@ impl MontyRepl {
         };
 
         Ok(Self {
-            repl: Some(repl),
+            repl: Arc::new(Mutex::new(Some(repl))),
             script_name,
         })
     }
@@ -602,18 +631,26 @@ impl MontyRepl {
 
         // If mounts are provided, use feed_start/resume loop to handle OsCall
         if os_handler.is_some() {
-            return self.feed_with_mounts(env, code, os_handler);
+            let print_callback_ref = options.print_callback.as_ref().map(Function::create_ref).transpose()?;
+            return self.feed_with_mounts(env, code, os_handler, print_callback_ref);
         }
 
-        let repl = self
-            .repl
-            .as_mut()
-            .ok_or_else(|| Error::from_reason("REPL session is currently in use"))?;
-
-        let output = match repl {
-            EitherRepl::NoLimit(repl) => repl.feed_run(&code, vec![], PrintWriter::Stdout),
-            EitherRepl::Limited(repl) => repl.feed_run(&code, vec![], PrintWriter::Stdout),
+        let mut print_cb;
+        let print_writer = match &options.print_callback {
+            Some(func) => {
+                print_cb = CallbackStringPrint::new_js(env, func)?;
+                PrintWriter::Callback(&mut print_cb)
+            }
+            None => PrintWriter::Stdout,
         };
+
+        let mut repl = take_shared_repl(&self.repl)?;
+
+        let output = match &mut repl {
+            EitherRepl::NoLimit(repl) => repl.feed_run(&code, vec![], print_writer),
+            EitherRepl::Limited(repl) => repl.feed_run(&code, vec![], print_writer),
+        };
+        put_shared_repl(&self.repl, repl)?;
 
         match output {
             Ok(value) => Ok(Either::A(monty_to_js(&value, env)?)),
@@ -621,11 +658,71 @@ impl MontyRepl {
         }
     }
 
+    /// Starts executing one incremental snippet and returns a resumable progress object.
+    #[napi]
+    pub fn feed_start<'env>(
+        &self,
+        env: &'env Env,
+        code: String,
+        options: Option<FeedOptions<'env>>,
+    ) -> Result<Either5<MontySnapshot, MontyNameLookup, MontyComplete, MontyOsCall, JsMontyException>> {
+        let options = options.unwrap_or_default();
+        let pause_os_calls = options.pause_os_calls.unwrap_or(false);
+        let os_handler = match options.mount.as_ref() {
+            Some(obj) => OsHandler::from_extracted(extract_mounts(obj)?),
+            None => None,
+        };
+        let mount_table: Option<MountTable> = os_handler.as_ref().map(OsHandler::take).transpose()?;
+        let mount_state = os_handler.zip(mount_table);
+        let print_callback_ref = options.print_callback.as_ref().map(Function::create_ref).transpose()?;
+
+        let repl = take_shared_repl(&self.repl)?;
+        let repl_state = Arc::clone(&self.repl);
+
+        macro_rules! feed_start_impl {
+            ($repl:expr) => {{
+                let mut print_cb = match &print_callback_ref {
+                    Some(func) => Some(CallbackStringPrint::new_js_ref(env, func)?),
+                    None => None,
+                };
+                let print_writer = match &mut print_cb {
+                    Some(cb) => PrintWriter::Callback(cb),
+                    None => PrintWriter::Stdout,
+                };
+                let progress = match $repl.feed_start(&code, vec![], print_writer) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        put_shared_repl(&repl_state, EitherRepl::from_core(e.repl))?;
+                        put_back_mount_state(mount_state);
+                        return Ok(Either5::E(JsMontyException::new(e.error)));
+                    }
+                };
+                repl_progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback_ref,
+                    self.script_name.clone(),
+                    mount_state,
+                    repl_state,
+                    pause_os_calls,
+                )
+            }};
+        }
+
+        match repl {
+            EitherRepl::NoLimit(repl) => feed_start_impl!(repl),
+            EitherRepl::Limited(repl) => feed_start_impl!(repl),
+        }
+    }
+
     /// Serializes this REPL session to bytes.
     #[napi]
     pub fn dump(&self) -> Result<Buffer> {
-        let repl = self
+        let repl_guard = self
             .repl
+            .lock()
+            .map_err(|_| Error::from_reason("REPL session lock is poisoned"))?;
+        let repl = repl_guard
             .as_ref()
             .ok_or_else(|| Error::from_reason("REPL session is currently in use"))?;
         let serialized = SerializedRepl {
@@ -643,7 +740,7 @@ impl MontyRepl {
         let serialized: SerializedReplOwned =
             postcard::from_bytes(&data).map_err(|e| Error::from_reason(format!("Deserialization failed: {e}")))?;
         Ok(Self {
-            repl: Some(serialized.repl),
+            repl: Arc::new(Mutex::new(Some(serialized.repl))),
             script_name: serialized.script_name,
         })
     }
@@ -666,6 +763,7 @@ impl MontyRepl {
         env: &'env Env,
         code: String,
         os_handler: Option<OsHandler>,
+        print_callback: Option<JsPrintCallbackRef>,
     ) -> Result<Either<JsMontyObject<'env>, JsMontyException>> {
         // Take mounts out of shared slots
         let mut mount_table: Option<MountTable> = os_handler.as_ref().map(OsHandler::take).transpose()?;
@@ -677,18 +775,23 @@ impl MontyRepl {
         };
 
         // Take the REPL out (feed_start consumes it)
-        let repl = self
-            .repl
-            .take()
-            .ok_or_else(|| Error::from_reason("REPL session is currently in use"))?;
+        let repl = take_shared_repl(&self.repl)?;
 
         macro_rules! feed_loop {
             ($repl:expr) => {{
-                let progress = match $repl.feed_start(&code, vec![], PrintWriter::Stdout) {
+                let mut print_cb = match &print_callback {
+                    Some(func) => Some(CallbackStringPrint::new_js_ref(env, func)?),
+                    None => None,
+                };
+                let print_writer = match &mut print_cb {
+                    Some(cb) => PrintWriter::Callback(cb),
+                    None => PrintWriter::Stdout,
+                };
+                let progress = match $repl.feed_start(&code, vec![], print_writer) {
                     Ok(p) => p,
                     Err(e) => {
                         // Restore REPL from error
-                        self.repl = Some(EitherRepl::from_core(e.repl));
+                        put_shared_repl(&self.repl, EitherRepl::from_core(e.repl))?;
                         put_back(mount_table);
                         return Ok(Either::B(JsMontyException::new(e.error)));
                     }
@@ -698,7 +801,7 @@ impl MontyRepl {
                 loop {
                     match progress {
                         ReplProgress::Complete { repl, value } => {
-                            self.repl = Some(EitherRepl::from_core(repl));
+                            put_shared_repl(&self.repl, EitherRepl::from_core(repl))?;
                             put_back(mount_table);
                             return Ok(Either::A(monty_to_js(&value, env)?));
                         }
@@ -708,10 +811,14 @@ impl MontyRepl {
                             } else {
                                 call.function_call.on_no_handler().into()
                             };
-                            progress = match call.resume(os_result, PrintWriter::Stdout) {
+                            let print_writer = match &mut print_cb {
+                                Some(cb) => PrintWriter::Callback(cb),
+                                None => PrintWriter::Stdout,
+                            };
+                            progress = match call.resume(os_result, print_writer) {
                                 Ok(p) => p,
                                 Err(e) => {
-                                    self.repl = Some(EitherRepl::from_core(e.repl));
+                                    put_shared_repl(&self.repl, EitherRepl::from_core(e.repl))?;
                                     put_back(mount_table);
                                     return Ok(Either::B(JsMontyException::new(e.error)));
                                 }
@@ -720,7 +827,7 @@ impl MontyRepl {
                         ReplProgress::FunctionCall(call) => {
                             // No external function support in feed — return error
                             let func_name = call.function_name.clone();
-                            self.repl = Some(EitherRepl::from_core(call.into_repl()));
+                            put_shared_repl(&self.repl, EitherRepl::from_core(call.into_repl()))?;
                             put_back(mount_table);
                             return Ok(Either::B(JsMontyException::new(MontyException::new(
                                 ExcType::RuntimeError,
@@ -731,17 +838,21 @@ impl MontyRepl {
                         }
                         ReplProgress::NameLookup(lookup) => {
                             // No name lookup support — let it raise NameError
-                            progress = match lookup.resume(NameLookupResult::Undefined, PrintWriter::Stdout) {
+                            let print_writer = match &mut print_cb {
+                                Some(cb) => PrintWriter::Callback(cb),
+                                None => PrintWriter::Stdout,
+                            };
+                            progress = match lookup.resume(NameLookupResult::Undefined, print_writer) {
                                 Ok(p) => p,
                                 Err(e) => {
-                                    self.repl = Some(EitherRepl::from_core(e.repl));
+                                    put_shared_repl(&self.repl, EitherRepl::from_core(e.repl))?;
                                     put_back(mount_table);
                                     return Ok(Either::B(JsMontyException::new(e.error)));
                                 }
                             };
                         }
                         ReplProgress::ResolveFutures(state) => {
-                            self.repl = Some(EitherRepl::from_core(state.into_repl()));
+                            put_shared_repl(&self.repl, EitherRepl::from_core(state.into_repl()))?;
                             put_back(mount_table);
                             return Err(Error::from_reason(
                                 "Async futures are not supported in REPL feed()",
@@ -759,16 +870,41 @@ impl MontyRepl {
     }
 }
 
+fn take_shared_repl(shared: &SharedRepl) -> Result<EitherRepl> {
+    let mut guard = shared
+        .lock()
+        .map_err(|_| Error::from_reason("REPL session lock is poisoned"))?;
+    guard
+        .take()
+        .ok_or_else(|| Error::from_reason("REPL session is currently in use"))
+}
+
+fn put_shared_repl(shared: &SharedRepl, repl: EitherRepl) -> Result<()> {
+    let mut guard = shared
+        .lock()
+        .map_err(|_| Error::from_reason("REPL session lock is poisoned"))?;
+    if guard.is_some() {
+        return Err(Error::from_reason("REPL session has already been restored"));
+    }
+    *guard = Some(repl);
+    Ok(())
+}
+
+fn restore_repl_start_error<T: ResourceTracker>(shared: &SharedRepl, err: ReplStartError<T>) -> Result<JsMontyException>
+where
+    EitherRepl: FromCoreRepl<T>,
+{
+    put_shared_repl(shared, EitherRepl::from_core(err.repl))?;
+    Ok(JsMontyException::new(err.error))
+}
+
 /// Handles an OS call from the REPL using a mount table.
 fn handle_os_call_with_table_repl<T: ResourceTracker>(
     call: &monty::ReplOsCall<T>,
     table: &mut MountTable,
 ) -> ExtFunctionResult {
-    match table.handle_os_call(&call.function_call) {
-        Some(Ok(obj)) => obj.into(),
-        Some(Err(mount_err)) => mount_err.into_exception().into(),
-        None => call.function_call.on_no_handler().into(),
-    }
+    handle_os_function_with_table(&call.function_call, table)
+        .unwrap_or_else(|| call.function_call.on_no_handler().into())
 }
 
 /// Trait to convert a typed `CoreMontyRepl<T>` back into `EitherRepl`.
@@ -864,7 +1000,18 @@ fn extract_input_values_in_order(
 enum EitherSnapshot {
     NoLimit(FunctionCall<NoLimitTracker>),
     Limited(FunctionCall<LimitedTracker>),
+    ReplNoLimit(ReplFunctionCall<NoLimitTracker>),
+    ReplLimited(ReplFunctionCall<LimitedTracker>),
     /// Sentinel indicating the snapshot has been consumed via `resume()`.
+    Done,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum EitherOsSnapshot {
+    NoLimit(OsCall<NoLimitTracker>),
+    Limited(OsCall<LimitedTracker>),
+    ReplNoLimit(ReplOsCall<NoLimitTracker>),
+    ReplLimited(ReplOsCall<LimitedTracker>),
     Done,
 }
 
@@ -898,6 +1045,10 @@ pub struct MontySnapshot {
     print_callback: Option<JsPrintCallbackRef>,
     /// Mount state carried from `start()` for use during `resume()`.
     mount_state: Option<MountState>,
+    /// REPL state to restore when a REPL feed-start chain completes or errors.
+    repl_state: Option<SharedRepl>,
+    /// Whether unhandled OS calls should be surfaced to JavaScript.
+    pause_os_calls: bool,
 }
 
 /// Options for resuming execution.
@@ -975,7 +1126,7 @@ impl MontySnapshot {
         &mut self,
         env: &'env Env,
         options: ResumeOptions<'env>,
-    ) -> Result<Either4<Self, MontyNameLookup, MontyComplete, JsMontyException>> {
+    ) -> Result<Either5<Self, MontyNameLookup, MontyComplete, MontyOsCall, JsMontyException>> {
         // Validate that exactly one of returnValue or exception is provided
         let external_result = match (options.return_value, options.exception) {
             (Some(value), None) => {
@@ -1016,6 +1167,8 @@ impl MontySnapshot {
 
         // Take mount state from the snapshot
         let mount_state = mem::take(&mut self.mount_state);
+        let repl_state = self.repl_state.clone();
+        let pause_os_calls = self.pause_os_calls;
 
         // Resume execution based on the snapshot type
         match snapshot {
@@ -1024,20 +1177,80 @@ impl MontySnapshot {
                     Ok(p) => p,
                     Err(exc) => {
                         put_back_mount_state(mount_state);
-                        return Ok(Either4::D(JsMontyException::new(exc)));
+                        return Ok(Either5::E(JsMontyException::new(exc)));
                     }
                 };
-                progress_to_result_with_mounts(env, progress, print_callback, self.script_name.clone(), mount_state)
+                progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    pause_os_calls,
+                )
             }
             EitherSnapshot::Limited(call) => {
                 let progress = match call.resume(external_result, print_writer) {
                     Ok(p) => p,
                     Err(exc) => {
                         put_back_mount_state(mount_state);
-                        return Ok(Either4::D(JsMontyException::new(exc)));
+                        return Ok(Either5::E(JsMontyException::new(exc)));
                     }
                 };
-                progress_to_result_with_mounts(env, progress, print_callback, self.script_name.clone(), mount_state)
+                progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    pause_os_calls,
+                )
+            }
+            EitherSnapshot::ReplNoLimit(call) => {
+                let Some(repl_state) = repl_state else {
+                    put_back_mount_state(mount_state);
+                    return Err(Error::from_reason("REPL snapshot is missing its REPL owner"));
+                };
+                let progress = match call.resume(external_result, print_writer) {
+                    Ok(p) => p,
+                    Err(exc) => {
+                        let exc = restore_repl_start_error(&repl_state, *exc)?;
+                        put_back_mount_state(mount_state);
+                        return Ok(Either5::E(exc));
+                    }
+                };
+                repl_progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    repl_state,
+                    pause_os_calls,
+                )
+            }
+            EitherSnapshot::ReplLimited(call) => {
+                let Some(repl_state) = repl_state else {
+                    put_back_mount_state(mount_state);
+                    return Err(Error::from_reason("REPL snapshot is missing its REPL owner"));
+                };
+                let progress = match call.resume(external_result, print_writer) {
+                    Ok(p) => p,
+                    Err(exc) => {
+                        let exc = restore_repl_start_error(&repl_state, *exc)?;
+                        put_back_mount_state(mount_state);
+                        return Ok(Either5::E(exc));
+                    }
+                };
+                repl_progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    repl_state,
+                    pause_os_calls,
+                )
             }
             EitherSnapshot::Done => Err(Error::from_reason("Snapshot has already been resumed")),
         }
@@ -1053,6 +1266,14 @@ impl MontySnapshot {
     pub fn dump(&self) -> Result<Buffer> {
         if matches!(self.snapshot, EitherSnapshot::Done) {
             return Err(Error::from_reason("Cannot dump snapshot that has already been resumed"));
+        }
+        if matches!(
+            self.snapshot,
+            EitherSnapshot::ReplNoLimit(_) | EitherSnapshot::ReplLimited(_)
+        ) {
+            return Err(Error::from_reason(
+                "Cannot dump REPL snapshots from the JS bindings; dump the MontyRepl after completion instead",
+            ));
         }
 
         let serialized = SerializedSnapshot {
@@ -1090,6 +1311,8 @@ impl MontySnapshot {
                 .map(Function::create_ref)
                 .transpose()?,
             mount_state: None,
+            repl_state: None,
+            pause_os_calls: false,
         })
     }
 
@@ -1098,6 +1321,242 @@ impl MontySnapshot {
     pub fn repr(&self) -> String {
         format!(
             "MontySnapshot(scriptName='{}', functionName='{}', args={:?}, kwargs={:?})",
+            self.script_name, self.function_name, self.args, self.kwargs
+        )
+    }
+}
+
+// =============================================================================
+// MontyOsCall - Paused execution at an OS call
+// =============================================================================
+
+/// Represents paused execution waiting for a host OS/filesystem operation.
+#[napi]
+pub struct MontyOsCall {
+    snapshot: EitherOsSnapshot,
+    script_name: String,
+    function_name: String,
+    args: Vec<MontyObject>,
+    kwargs: Vec<(MontyObject, MontyObject)>,
+    print_callback: Option<JsPrintCallbackRef>,
+    mount_state: Option<MountState>,
+    repl_state: Option<SharedRepl>,
+    pause_os_calls: bool,
+}
+
+#[napi]
+impl MontyOsCall {
+    /// Returns the name of the script being executed.
+    #[napi(getter)]
+    pub fn script_name(&self) -> String {
+        self.script_name.clone()
+    }
+
+    /// Returns the stable OS function name, such as `Path.read_text` or `Open`.
+    #[napi(getter)]
+    pub fn function_name(&self) -> String {
+        self.function_name.clone()
+    }
+
+    /// Returns the positional arguments passed to the OS operation.
+    #[napi(getter)]
+    pub fn args<'env>(&self, env: &'env Env) -> Result<Vec<JsMontyObject<'env>>> {
+        self.args.iter().map(|obj| monty_to_js(obj, env)).collect()
+    }
+
+    /// Returns the keyword arguments passed to the OS operation as an object.
+    #[napi(getter)]
+    pub fn kwargs<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
+        let mut obj = Object::new(env)?;
+        for (k, v) in &self.kwargs {
+            let key = match k {
+                MontyObject::String(s) => s.clone(),
+                _ => format!("{k:?}"),
+            };
+            let js_value = monty_to_js(v, env)?;
+            obj.set_named_property(&key, js_value)?;
+        }
+        Ok(obj)
+    }
+
+    /// Resumes execution with either the OS call return value or an exception.
+    #[napi]
+    pub fn resume<'env>(
+        &mut self,
+        env: &'env Env,
+        options: ResumeOptions<'env>,
+    ) -> Result<Either5<MontySnapshot, MontyNameLookup, MontyComplete, Self, JsMontyException>> {
+        let external_result = match (options.return_value, options.exception) {
+            (Some(value), None) => {
+                let monty_value = js_to_monty(value, *env)?;
+                ExtFunctionResult::Return(monty_value)
+            }
+            (None, Some(exc)) => {
+                let monty_exc = MontyException::new(string_to_exc_type(&exc.r#type)?, Some(exc.message));
+                ExtFunctionResult::Error(monty_exc)
+            }
+            (Some(_), Some(_)) => {
+                return Err(Error::from_reason(
+                    "resume() accepts either returnValue or exception, not both",
+                ));
+            }
+            (None, None) => {
+                return Err(Error::from_reason("resume() requires either returnValue or exception"));
+            }
+        };
+
+        let snapshot = mem::replace(&mut self.snapshot, EitherOsSnapshot::Done);
+        let print_callback = mem::take(&mut self.print_callback);
+        let mut print_cb;
+        let print_writer = match &print_callback {
+            Some(func) => {
+                print_cb = CallbackStringPrint::new_js_ref(env, func)?;
+                PrintWriter::Callback(&mut print_cb)
+            }
+            None => PrintWriter::Stdout,
+        };
+        let mount_state = mem::take(&mut self.mount_state);
+        let repl_state = self.repl_state.clone();
+        let pause_os_calls = self.pause_os_calls;
+
+        match snapshot {
+            EitherOsSnapshot::NoLimit(call) => {
+                let progress = match call.resume(external_result, print_writer) {
+                    Ok(p) => p,
+                    Err(exc) => {
+                        put_back_mount_state(mount_state);
+                        return Ok(Either5::E(JsMontyException::new(exc)));
+                    }
+                };
+                progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    pause_os_calls,
+                )
+            }
+            EitherOsSnapshot::Limited(call) => {
+                let progress = match call.resume(external_result, print_writer) {
+                    Ok(p) => p,
+                    Err(exc) => {
+                        put_back_mount_state(mount_state);
+                        return Ok(Either5::E(JsMontyException::new(exc)));
+                    }
+                };
+                progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    pause_os_calls,
+                )
+            }
+            EitherOsSnapshot::ReplNoLimit(call) => {
+                let Some(repl_state) = repl_state else {
+                    put_back_mount_state(mount_state);
+                    return Err(Error::from_reason("REPL OS call is missing its REPL owner"));
+                };
+                let progress = match call.resume(external_result, print_writer) {
+                    Ok(p) => p,
+                    Err(exc) => {
+                        let exc = restore_repl_start_error(&repl_state, *exc)?;
+                        put_back_mount_state(mount_state);
+                        return Ok(Either5::E(exc));
+                    }
+                };
+                repl_progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    repl_state,
+                    pause_os_calls,
+                )
+            }
+            EitherOsSnapshot::ReplLimited(call) => {
+                let Some(repl_state) = repl_state else {
+                    put_back_mount_state(mount_state);
+                    return Err(Error::from_reason("REPL OS call is missing its REPL owner"));
+                };
+                let progress = match call.resume(external_result, print_writer) {
+                    Ok(p) => p,
+                    Err(exc) => {
+                        let exc = restore_repl_start_error(&repl_state, *exc)?;
+                        put_back_mount_state(mount_state);
+                        return Ok(Either5::E(exc));
+                    }
+                };
+                repl_progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    repl_state,
+                    pause_os_calls,
+                )
+            }
+            EitherOsSnapshot::Done => Err(Error::from_reason("OS call has already been resumed")),
+        }
+    }
+
+    /// Serializes this OS call snapshot. REPL OS calls cannot be dumped.
+    #[napi]
+    pub fn dump(&self) -> Result<Buffer> {
+        if matches!(self.snapshot, EitherOsSnapshot::Done) {
+            return Err(Error::from_reason("Cannot dump OS call that has already been resumed"));
+        }
+        if matches!(
+            self.snapshot,
+            EitherOsSnapshot::ReplNoLimit(_) | EitherOsSnapshot::ReplLimited(_)
+        ) {
+            return Err(Error::from_reason(
+                "Cannot dump REPL OS calls from the JS bindings; dump the MontyRepl after completion instead",
+            ));
+        }
+        let serialized = SerializedOsCall {
+            snapshot: &self.snapshot,
+            script_name: &self.script_name,
+            function_name: &self.function_name,
+            args: &self.args,
+            kwargs: &self.kwargs,
+        };
+        let bytes =
+            postcard::to_allocvec(&serialized).map_err(|e| Error::from_reason(format!("Serialization failed: {e}")))?;
+        Ok(Buffer::from(bytes))
+    }
+
+    /// Deserializes an OS call snapshot.
+    #[napi(factory)]
+    pub fn load(data: Buffer, options: Option<SnapshotLoadOptions>) -> Result<Self> {
+        let serialized: SerializedOsCallOwned =
+            postcard::from_bytes(&data).map_err(|e| Error::from_reason(format!("Deserialization failed: {e}")))?;
+        Ok(Self {
+            snapshot: serialized.snapshot,
+            script_name: serialized.script_name,
+            function_name: serialized.function_name,
+            args: serialized.args,
+            kwargs: serialized.kwargs,
+            print_callback: options
+                .as_ref()
+                .and_then(|t| t.print_callback.as_ref())
+                .map(Function::create_ref)
+                .transpose()?,
+            mount_state: None,
+            repl_state: None,
+            pause_os_calls: false,
+        })
+    }
+
+    /// Returns a string representation of this OS call.
+    #[napi]
+    pub fn repr(&self) -> String {
+        format!(
+            "MontyOsCall(scriptName='{}', functionName='{}', args={:?}, kwargs={:?})",
             self.script_name, self.function_name, self.args, self.kwargs
         )
     }
@@ -1144,6 +1603,8 @@ impl MontyComplete {
 enum EitherLookupSnapshot {
     NoLimit(NameLookup<NoLimitTracker>),
     Limited(NameLookup<LimitedTracker>),
+    ReplNoLimit(ReplNameLookup<NoLimitTracker>),
+    ReplLimited(ReplNameLookup<LimitedTracker>),
     /// Sentinel indicating the snapshot has been consumed via `resume()`.
     Done,
 }
@@ -1163,6 +1624,22 @@ impl FromLookupSnapshot<NoLimitTracker> for EitherLookupSnapshot {
 impl FromLookupSnapshot<LimitedTracker> for EitherLookupSnapshot {
     fn from_lookup(lookup: NameLookup<LimitedTracker>) -> Self {
         Self::Limited(lookup)
+    }
+}
+
+trait FromReplLookupSnapshot<T: ResourceTracker> {
+    fn from_repl_lookup(lookup: ReplNameLookup<T>) -> Self;
+}
+
+impl FromReplLookupSnapshot<NoLimitTracker> for EitherLookupSnapshot {
+    fn from_repl_lookup(lookup: ReplNameLookup<NoLimitTracker>) -> Self {
+        Self::ReplNoLimit(lookup)
+    }
+}
+
+impl FromReplLookupSnapshot<LimitedTracker> for EitherLookupSnapshot {
+    fn from_repl_lookup(lookup: ReplNameLookup<LimitedTracker>) -> Self {
+        Self::ReplLimited(lookup)
     }
 }
 
@@ -1187,6 +1664,10 @@ pub struct MontyNameLookup {
     print_callback: Option<JsPrintCallbackRef>,
     /// Mount state carried from `start()` for use during `resume()`.
     mount_state: Option<MountState>,
+    /// REPL state to restore when a REPL feed-start chain completes or errors.
+    repl_state: Option<SharedRepl>,
+    /// Whether unhandled OS calls should be surfaced to JavaScript.
+    pause_os_calls: bool,
 }
 
 /// Options for resuming execution from a name lookup.
@@ -1233,7 +1714,7 @@ impl MontyNameLookup {
         &mut self,
         env: &'env Env,
         options: Option<NameLookupResumeOptions<'env>>,
-    ) -> Result<Either4<MontySnapshot, Self, MontyComplete, JsMontyException>> {
+    ) -> Result<Either5<MontySnapshot, Self, MontyComplete, MontyOsCall, JsMontyException>> {
         let lookup_result = match options.and_then(|opts| opts.value) {
             Some(value) => {
                 let monty_value = js_to_monty(value, *env)?;
@@ -1260,6 +1741,8 @@ impl MontyNameLookup {
 
         // Take mount state from the snapshot
         let mount_state = mem::take(&mut self.mount_state);
+        let repl_state = self.repl_state.clone();
+        let pause_os_calls = self.pause_os_calls;
 
         match snapshot {
             EitherLookupSnapshot::NoLimit(lookup) => {
@@ -1267,20 +1750,80 @@ impl MontyNameLookup {
                     Ok(p) => p,
                     Err(exc) => {
                         put_back_mount_state(mount_state);
-                        return Ok(Either4::D(JsMontyException::new(exc)));
+                        return Ok(Either5::E(JsMontyException::new(exc)));
                     }
                 };
-                progress_to_result_with_mounts(env, progress, print_callback, self.script_name.clone(), mount_state)
+                progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    pause_os_calls,
+                )
             }
             EitherLookupSnapshot::Limited(lookup) => {
                 let progress = match lookup.resume(lookup_result, print_writer) {
                     Ok(p) => p,
                     Err(exc) => {
                         put_back_mount_state(mount_state);
-                        return Ok(Either4::D(JsMontyException::new(exc)));
+                        return Ok(Either5::E(JsMontyException::new(exc)));
                     }
                 };
-                progress_to_result_with_mounts(env, progress, print_callback, self.script_name.clone(), mount_state)
+                progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    pause_os_calls,
+                )
+            }
+            EitherLookupSnapshot::ReplNoLimit(lookup) => {
+                let Some(repl_state) = repl_state else {
+                    put_back_mount_state(mount_state);
+                    return Err(Error::from_reason("REPL name lookup is missing its REPL owner"));
+                };
+                let progress = match lookup.resume(lookup_result, print_writer) {
+                    Ok(p) => p,
+                    Err(exc) => {
+                        let exc = restore_repl_start_error(&repl_state, *exc)?;
+                        put_back_mount_state(mount_state);
+                        return Ok(Either5::E(exc));
+                    }
+                };
+                repl_progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    repl_state,
+                    pause_os_calls,
+                )
+            }
+            EitherLookupSnapshot::ReplLimited(lookup) => {
+                let Some(repl_state) = repl_state else {
+                    put_back_mount_state(mount_state);
+                    return Err(Error::from_reason("REPL name lookup is missing its REPL owner"));
+                };
+                let progress = match lookup.resume(lookup_result, print_writer) {
+                    Ok(p) => p,
+                    Err(exc) => {
+                        let exc = restore_repl_start_error(&repl_state, *exc)?;
+                        put_back_mount_state(mount_state);
+                        return Ok(Either5::E(exc));
+                    }
+                };
+                repl_progress_to_result_with_mounts(
+                    env,
+                    progress,
+                    print_callback,
+                    self.script_name.clone(),
+                    mount_state,
+                    repl_state,
+                    pause_os_calls,
+                )
             }
             EitherLookupSnapshot::Done => Err(Error::from_reason("Name lookup has already been resumed")),
         }
@@ -1296,6 +1839,14 @@ impl MontyNameLookup {
         if matches!(self.snapshot, EitherLookupSnapshot::Done) {
             return Err(Error::from_reason(
                 "Cannot dump name lookup that has already been resumed",
+            ));
+        }
+        if matches!(
+            self.snapshot,
+            EitherLookupSnapshot::ReplNoLimit(_) | EitherLookupSnapshot::ReplLimited(_)
+        ) {
+            return Err(Error::from_reason(
+                "Cannot dump REPL name lookups from the JS bindings; dump the MontyRepl after completion instead",
             ));
         }
 
@@ -1330,6 +1881,8 @@ impl MontyNameLookup {
                 .map(Function::create_ref)
                 .transpose()?,
             mount_state: None,
+            repl_state: None,
+            pause_os_calls: false,
         })
     }
 
@@ -1398,11 +1951,13 @@ fn progress_to_result_with_mounts<T>(
     print_callback: Option<JsPrintCallbackRef>,
     script_name: String,
     mut mount_state: Option<MountState>,
-) -> Result<Either4<MontySnapshot, MontyNameLookup, MontyComplete, JsMontyException>>
+    pause_os_calls: bool,
+) -> Result<Either5<MontySnapshot, MontyNameLookup, MontyComplete, MontyOsCall, JsMontyException>>
 where
     T: ResourceTracker + serde::Serialize + DeserializeOwned,
     EitherSnapshot: FromSnapshot<T>,
     EitherLookupSnapshot: FromLookupSnapshot<T>,
+    EitherOsSnapshot: FromOsSnapshot<T>,
 {
     // Build a reusable print callback so OsCall resumes use the JS callback
     // instead of falling back to stdout.
@@ -1416,13 +1971,13 @@ where
         match progress {
             RunProgress::Complete(result) => {
                 put_back_mount_state(mount_state);
-                return Ok(Either4::C(MontyComplete { output_value: result }));
+                return Ok(Either5::C(MontyComplete { output_value: result }));
             }
             RunProgress::FunctionCall(call) => {
                 let function_name = call.function_name.clone();
                 let args = call.args.clone();
                 let kwargs = call.kwargs.clone();
-                return Ok(Either4::A(MontySnapshot {
+                return Ok(Either5::A(MontySnapshot {
                     snapshot: EitherSnapshot::from_snapshot(call),
                     script_name,
                     function_name,
@@ -1430,32 +1985,62 @@ where
                     kwargs,
                     print_callback,
                     mount_state,
+                    repl_state: None,
+                    pause_os_calls,
                 }));
             }
             RunProgress::NameLookup(lookup) => {
                 let variable_name = lookup.name.clone();
-                return Ok(Either4::B(MontyNameLookup {
+                return Ok(Either5::B(MontyNameLookup {
                     snapshot: EitherLookupSnapshot::from_lookup(lookup),
                     script_name,
                     variable_name,
                     print_callback,
                     mount_state,
+                    repl_state: None,
+                    pause_os_calls,
                 }));
             }
             RunProgress::ResolveFutures(_) => {
                 put_back_mount_state(mount_state);
-                return Ok(Either4::D(JsMontyException::new(MontyException::new(
+                return Ok(Either5::E(JsMontyException::new(MontyException::new(
                     ExcType::NotImplementedError,
                     Some("Async futures (ResolveFutures) are not yet supported in the JS bindings".to_owned()),
                 ))));
             }
             RunProgress::OsCall(call) => {
-                let os_result = if let Some((_, ref mut table)) = mount_state {
-                    handle_os_call_with_table(&call, table)
-                } else {
-                    // No mounts configured — use on_no_handler for appropriate error
-                    call.function_call.on_no_handler().into()
-                };
+                if let Some((_, ref mut table)) = mount_state {
+                    if let Some(os_result) = handle_os_call_with_table(&call, table) {
+                        let print_writer = match &mut print_cb {
+                            Some(cb) => PrintWriter::Callback(cb),
+                            None => PrintWriter::Stdout,
+                        };
+                        progress = match call.resume(os_result, print_writer) {
+                            Ok(p) => p,
+                            Err(exc) => {
+                                put_back_mount_state(mount_state);
+                                return Ok(Either5::E(JsMontyException::new(exc)));
+                            }
+                        };
+                        continue;
+                    }
+                }
+                if pause_os_calls {
+                    let function_name = call.function_call.name().to_owned();
+                    let (args, kwargs) = call.function_call.clone().to_args();
+                    return Ok(Either5::D(MontyOsCall {
+                        snapshot: EitherOsSnapshot::from_os_snapshot(call),
+                        script_name,
+                        function_name,
+                        args,
+                        kwargs,
+                        print_callback,
+                        mount_state,
+                        repl_state: None,
+                        pause_os_calls,
+                    }));
+                }
+                let os_result: ExtFunctionResult = call.function_call.on_no_handler().into();
                 let print_writer = match &mut print_cb {
                     Some(cb) => PrintWriter::Callback(cb),
                     None => PrintWriter::Stdout,
@@ -1464,7 +2049,7 @@ where
                     Ok(p) => p,
                     Err(exc) => {
                         put_back_mount_state(mount_state);
-                        return Ok(Either4::D(JsMontyException::new(exc)));
+                        return Ok(Either5::E(JsMontyException::new(exc)));
                     }
                 };
             }
@@ -1479,24 +2064,153 @@ fn put_back_mount_state(mount_state: Option<MountState>) {
     }
 }
 
+fn repl_progress_to_result_with_mounts<T>(
+    env: &Env,
+    mut progress: ReplProgress<T>,
+    print_callback: Option<JsPrintCallbackRef>,
+    script_name: String,
+    mut mount_state: Option<MountState>,
+    repl_state: SharedRepl,
+    pause_os_calls: bool,
+) -> Result<Either5<MontySnapshot, MontyNameLookup, MontyComplete, MontyOsCall, JsMontyException>>
+where
+    T: ResourceTracker,
+    EitherRepl: FromCoreRepl<T>,
+    EitherSnapshot: FromReplSnapshot<T>,
+    EitherLookupSnapshot: FromReplLookupSnapshot<T>,
+    EitherOsSnapshot: FromReplOsSnapshot<T>,
+{
+    let mut print_cb = match &print_callback {
+        Some(func) => Some(CallbackStringPrint::new_js_ref(env, func)?),
+        None => None,
+    };
+
+    loop {
+        match progress {
+            ReplProgress::Complete { repl, value } => {
+                put_shared_repl(&repl_state, EitherRepl::from_core(repl))?;
+                put_back_mount_state(mount_state);
+                return Ok(Either5::C(MontyComplete { output_value: value }));
+            }
+            ReplProgress::FunctionCall(call) => {
+                let function_name = call.function_name.clone();
+                let args = call.args.clone();
+                let kwargs = call.kwargs.clone();
+                return Ok(Either5::A(MontySnapshot {
+                    snapshot: EitherSnapshot::from_repl_snapshot(call),
+                    script_name,
+                    function_name,
+                    args,
+                    kwargs,
+                    print_callback,
+                    mount_state,
+                    repl_state: Some(repl_state),
+                    pause_os_calls,
+                }));
+            }
+            ReplProgress::NameLookup(lookup) => {
+                let variable_name = lookup.name.clone();
+                return Ok(Either5::B(MontyNameLookup {
+                    snapshot: EitherLookupSnapshot::from_repl_lookup(lookup),
+                    script_name,
+                    variable_name,
+                    print_callback,
+                    mount_state,
+                    repl_state: Some(repl_state),
+                    pause_os_calls,
+                }));
+            }
+            ReplProgress::ResolveFutures(state) => {
+                put_shared_repl(&repl_state, EitherRepl::from_core(state.into_repl()))?;
+                put_back_mount_state(mount_state);
+                return Ok(Either5::E(JsMontyException::new(MontyException::new(
+                    ExcType::NotImplementedError,
+                    Some("Async futures (ResolveFutures) are not yet supported in the JS REPL bindings".to_owned()),
+                ))));
+            }
+            ReplProgress::OsCall(call) => {
+                if let Some((_, ref mut table)) = mount_state {
+                    if let Some(os_result) = handle_repl_os_call_with_table(&call, table) {
+                        let print_writer = match &mut print_cb {
+                            Some(cb) => PrintWriter::Callback(cb),
+                            None => PrintWriter::Stdout,
+                        };
+                        progress = match call.resume(os_result, print_writer) {
+                            Ok(p) => p,
+                            Err(exc) => {
+                                let exc = restore_repl_start_error(&repl_state, *exc)?;
+                                put_back_mount_state(mount_state);
+                                return Ok(Either5::E(exc));
+                            }
+                        };
+                        continue;
+                    }
+                }
+                if pause_os_calls {
+                    let function_name = call.function_call.name().to_owned();
+                    let (args, kwargs) = call.function_call.clone().to_args();
+                    return Ok(Either5::D(MontyOsCall {
+                        snapshot: EitherOsSnapshot::from_repl_os_snapshot(call),
+                        script_name,
+                        function_name,
+                        args,
+                        kwargs,
+                        print_callback,
+                        mount_state,
+                        repl_state: Some(repl_state),
+                        pause_os_calls,
+                    }));
+                }
+                let os_result: ExtFunctionResult = call.function_call.on_no_handler().into();
+                let print_writer = match &mut print_cb {
+                    Some(cb) => PrintWriter::Callback(cb),
+                    None => PrintWriter::Stdout,
+                };
+                progress = match call.resume(os_result, print_writer) {
+                    Ok(p) => p,
+                    Err(exc) => {
+                        let exc = restore_repl_start_error(&repl_state, *exc)?;
+                        put_back_mount_state(mount_state);
+                        return Ok(Either5::E(exc));
+                    }
+                };
+            }
+        }
+    }
+}
+
 /// Handles an OS call by dispatching to the mount table.
 ///
 /// Returns the result from the mount table if it handles the call,
 /// or falls back to [`OsFunctionCall::on_no_handler`] for unhandled calls.
 fn handle_os_call<T: ResourceTracker>(call: &OsCall<T>, mount_table: &mut Option<MountTable>) -> ExtFunctionResult {
     if let Some(table) = mount_table {
-        handle_os_call_with_table(call, table)
+        handle_os_call_with_table(call, table).unwrap_or_else(|| call.function_call.on_no_handler().into())
     } else {
         call.function_call.on_no_handler().into()
     }
 }
 
 /// Handles an OS call using a specific mount table.
-fn handle_os_call_with_table<T: ResourceTracker>(call: &OsCall<T>, table: &mut MountTable) -> ExtFunctionResult {
-    match table.handle_os_call(&call.function_call) {
-        Some(Ok(obj)) => obj.into(),
-        Some(Err(mount_err)) => mount_err.into_exception().into(),
-        None => call.function_call.on_no_handler().into(),
+fn handle_os_call_with_table<T: ResourceTracker>(
+    call: &OsCall<T>,
+    table: &mut MountTable,
+) -> Option<ExtFunctionResult> {
+    handle_os_function_with_table(&call.function_call, table)
+}
+
+fn handle_repl_os_call_with_table<T: ResourceTracker>(
+    call: &ReplOsCall<T>,
+    table: &mut MountTable,
+) -> Option<ExtFunctionResult> {
+    handle_os_function_with_table(&call.function_call, table)
+}
+
+fn handle_os_function_with_table(call: &monty::OsFunctionCall, table: &mut MountTable) -> Option<ExtFunctionResult> {
+    match table.handle_os_call(call) {
+        Some(Ok(obj)) => Some(obj.into()),
+        Some(Err(mount_err)) => Some(mount_err.into_exception().into()),
+        None => None,
     }
 }
 
@@ -1515,6 +2229,54 @@ impl FromSnapshot<NoLimitTracker> for EitherSnapshot {
 impl FromSnapshot<LimitedTracker> for EitherSnapshot {
     fn from_snapshot(call: FunctionCall<LimitedTracker>) -> Self {
         Self::Limited(call)
+    }
+}
+
+trait FromReplSnapshot<T: ResourceTracker> {
+    fn from_repl_snapshot(call: ReplFunctionCall<T>) -> Self;
+}
+
+impl FromReplSnapshot<NoLimitTracker> for EitherSnapshot {
+    fn from_repl_snapshot(call: ReplFunctionCall<NoLimitTracker>) -> Self {
+        Self::ReplNoLimit(call)
+    }
+}
+
+impl FromReplSnapshot<LimitedTracker> for EitherSnapshot {
+    fn from_repl_snapshot(call: ReplFunctionCall<LimitedTracker>) -> Self {
+        Self::ReplLimited(call)
+    }
+}
+
+trait FromOsSnapshot<T: ResourceTracker> {
+    fn from_os_snapshot(call: OsCall<T>) -> Self;
+}
+
+impl FromOsSnapshot<NoLimitTracker> for EitherOsSnapshot {
+    fn from_os_snapshot(call: OsCall<NoLimitTracker>) -> Self {
+        Self::NoLimit(call)
+    }
+}
+
+impl FromOsSnapshot<LimitedTracker> for EitherOsSnapshot {
+    fn from_os_snapshot(call: OsCall<LimitedTracker>) -> Self {
+        Self::Limited(call)
+    }
+}
+
+trait FromReplOsSnapshot<T: ResourceTracker> {
+    fn from_repl_os_snapshot(call: ReplOsCall<T>) -> Self;
+}
+
+impl FromReplOsSnapshot<NoLimitTracker> for EitherOsSnapshot {
+    fn from_repl_os_snapshot(call: ReplOsCall<NoLimitTracker>) -> Self {
+        Self::ReplNoLimit(call)
+    }
+}
+
+impl FromReplOsSnapshot<LimitedTracker> for EitherOsSnapshot {
+    fn from_repl_os_snapshot(call: ReplOsCall<LimitedTracker>) -> Self {
+        Self::ReplLimited(call)
     }
 }
 
@@ -1565,6 +2327,26 @@ struct SerializedSnapshot<'a> {
 #[derive(serde::Deserialize)]
 struct SerializedSnapshotOwned {
     snapshot: EitherSnapshot,
+    script_name: String,
+    function_name: String,
+    args: Vec<MontyObject>,
+    kwargs: Vec<(MontyObject, MontyObject)>,
+}
+
+/// Serialization wrapper for `MontyOsCall` using borrowed references.
+#[derive(serde::Serialize)]
+struct SerializedOsCall<'a> {
+    snapshot: &'a EitherOsSnapshot,
+    script_name: &'a str,
+    function_name: &'a str,
+    args: &'a [MontyObject],
+    kwargs: &'a [(MontyObject, MontyObject)],
+}
+
+/// Owned version of `SerializedOsCall` for deserialization.
+#[derive(serde::Deserialize)]
+struct SerializedOsCallOwned {
+    snapshot: EitherOsSnapshot,
     script_name: String,
     function_name: String,
     args: Vec<MontyObject>,

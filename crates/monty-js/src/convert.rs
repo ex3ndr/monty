@@ -26,12 +26,18 @@
 //! - `MontyObject::Type` → `{ __monty_type__: 'Type', value }`
 //! - `MontyObject::BuiltinFunction` → `{ __monty_type__: 'BuiltinFunction', value }`
 //! - `MontyObject::Dataclass` → `{ __monty_type__: 'Dataclass', name, fields, ... }`
+//! - JS `{ __monty_type__: 'Path', value }` → `MontyObject::Path`
+//! - JS `{ __monty_type__: 'FileHandle', path, mode, position }` → `MontyObject::FileHandle`
+//! - JS `{ __monty_type__: 'StatResult', ... }` → `MontyObject::NamedTuple`
 //! - `MontyObject::Repr` → plain `string`
 //! - `MontyObject::Cycle` → placeholder `string`
 
 use std::{collections::HashMap, ptr};
 
-use monty::{DictPairs, ExcType, MontyDate, MontyDateTime, MontyObject, MontyTimeDelta, MontyTimeZone};
+use monty::{
+    stat_result, DictPairs, ExcType, FileMode, MontyDate, MontyDateTime, MontyFileHandle, MontyObject, MontyTimeDelta,
+    MontyTimeZone,
+};
 use napi::{bindgen_prelude::*, sys::Status};
 use num_bigint::BigInt as NumBigInt;
 
@@ -632,6 +638,42 @@ fn js_marked_object_to_monty(obj: &Object, monty_type: &str, env: Env) -> Result
             offset_seconds: obj.get_named_property::<i32>("offsetSeconds")?,
             name: obj.get_named_property::<Option<String>>("name")?,
         })),
+        "Path" => {
+            let value: String = obj.get_named_property("value")?;
+            Ok(MontyObject::Path(value))
+        }
+        "FileHandle" => {
+            let path: String = obj.get_named_property("path")?;
+            let mode_str: String = obj.get_named_property("mode")?;
+            let mode: FileMode = mode_str
+                .parse()
+                .map_err(|e| Error::from_reason(format!("Invalid file mode for FileHandle: {e}")))?;
+            let position = obj.get_named_property::<Option<i64>>("position")?.unwrap_or(0);
+            if position < 0 {
+                return Err(Error::from_reason("FileHandle position cannot be negative"));
+            }
+            #[expect(clippy::cast_sign_loss, reason = "position is checked as non-negative")]
+            Ok(MontyObject::FileHandle(MontyFileHandle {
+                path,
+                mode,
+                position: position as u64,
+            }))
+        }
+        "StatResult" => {
+            let st_mode = obj.get_named_property::<Option<i64>>("stMode")?.unwrap_or(0o100_644);
+            let st_ino = obj.get_named_property::<Option<i64>>("stIno")?.unwrap_or(0);
+            let st_dev = obj.get_named_property::<Option<i64>>("stDev")?.unwrap_or(0);
+            let st_nlink = obj.get_named_property::<Option<i64>>("stNlink")?.unwrap_or(1);
+            let st_uid = obj.get_named_property::<Option<i64>>("stUid")?.unwrap_or(0);
+            let st_gid = obj.get_named_property::<Option<i64>>("stGid")?.unwrap_or(0);
+            let st_size = obj.get_named_property::<Option<i64>>("stSize")?.unwrap_or(0);
+            let st_atime = obj.get_named_property::<Option<f64>>("stAtime")?.unwrap_or(0.0);
+            let st_mtime = obj.get_named_property::<Option<f64>>("stMtime")?.unwrap_or(st_atime);
+            let st_ctime = obj.get_named_property::<Option<f64>>("stCtime")?.unwrap_or(st_mtime);
+            Ok(stat_result(
+                st_mode, st_ino, st_dev, st_nlink, st_uid, st_gid, st_size, st_atime, st_mtime, st_ctime,
+            ))
+        }
         "Type" => {
             // Type objects can't be fully round-tripped; return as Repr
             let value: String = obj.get_named_property("value")?;
