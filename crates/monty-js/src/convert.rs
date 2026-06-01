@@ -460,6 +460,11 @@ pub fn js_to_monty(value: Unknown<'_>, env: Env) -> Result<MontyObject> {
         ValueType::Object => {
             let obj: Object = value.coerce_to_object()?;
 
+            // Check if it's a Date
+            if is_js_date(&obj, env)? {
+                return Ok(MontyObject::DateTime(js_date_to_monty_datetime(obj, &env, None)?));
+            }
+
             // Check if it's a Buffer (Uint8Array)
             if obj.is_buffer()? {
                 let buffer: BufferSlice = BufferSlice::from_unknown(value)?;
@@ -509,6 +514,38 @@ pub fn js_to_monty(value: Unknown<'_>, env: Env) -> Result<MontyObject> {
     }
 }
 
+/// Converts an external function result to `MontyObject`, with OS-call-specific
+/// handling for JavaScript `Date` objects.
+pub fn js_external_result_to_monty(
+    function_name: &str,
+    call_args: &[MontyObject],
+    value: Unknown<'_>,
+    env: Env,
+) -> Result<MontyObject> {
+    if value.get_type()? == ValueType::Object {
+        let obj: Object = value.coerce_to_object()?;
+        if is_js_date(&obj, env)? {
+            return match function_name {
+                "date.today" => Ok(MontyObject::Date(js_date_to_monty_date(obj)?)),
+                "datetime.now" => Ok(MontyObject::DateTime(js_date_to_monty_datetime(
+                    obj,
+                    &env,
+                    datetime_now_timezone_arg(call_args),
+                )?)),
+                _ => Ok(MontyObject::DateTime(js_date_to_monty_datetime(obj, &env, None)?)),
+            };
+        }
+    }
+    js_to_monty(value, env)
+}
+
+fn datetime_now_timezone_arg(args: &[MontyObject]) -> Option<&MontyTimeZone> {
+    match args.first() {
+        Some(MontyObject::TimeZone(tz)) => Some(tz),
+        _ => None,
+    }
+}
+
 /// Checks if a JS object is an instance of Set.
 fn is_js_set(obj: &Object, env: Env) -> Result<bool> {
     let global = env.get_global()?;
@@ -521,6 +558,83 @@ fn is_js_map(obj: &Object, env: Env) -> Result<bool> {
     let global = env.get_global()?;
     let map_constructor: Function<()> = global.get_named_property("Map")?;
     obj.instanceof(map_constructor)
+}
+
+/// Checks if a JS object is an instance of Date.
+fn is_js_date(obj: &Object, env: Env) -> Result<bool> {
+    let global = env.get_global()?;
+    let date_constructor: Function<()> = global.get_named_property("Date")?;
+    obj.instanceof(date_constructor)
+}
+
+fn js_date_to_monty_date(date: Object<'_>) -> Result<MontyDate> {
+    Ok(MontyDate {
+        year: call_js_date_i32(date, "getFullYear")?,
+        month: u8::try_from(call_js_date_i32(date, "getMonth")? + 1)
+            .map_err(|_| Error::from_reason("Date month is out of range"))?,
+        day: u8::try_from(call_js_date_i32(date, "getDate")?)
+            .map_err(|_| Error::from_reason("Date day is out of range"))?,
+    })
+}
+
+fn js_date_to_monty_datetime(date: Object<'_>, env: &Env, timezone: Option<&MontyTimeZone>) -> Result<MontyDateTime> {
+    if let Some(tz) = timezone {
+        let adjusted = js_date_with_offset(date, env, tz.offset_seconds)?;
+        return monty_datetime_from_js_date(adjusted, true, Some(tz.offset_seconds), tz.name.clone());
+    }
+
+    monty_datetime_from_js_date(date, false, None, None)
+}
+
+fn monty_datetime_from_js_date(
+    date: Object<'_>,
+    utc_getters: bool,
+    offset_seconds: Option<i32>,
+    timezone_name: Option<String>,
+) -> Result<MontyDateTime> {
+    let method = |local: &'static str, utc: &'static str| if utc_getters { utc } else { local };
+
+    Ok(MontyDateTime {
+        year: call_js_date_i32(date, method("getFullYear", "getUTCFullYear"))?,
+        month: u8::try_from(call_js_date_i32(date, method("getMonth", "getUTCMonth"))? + 1)
+            .map_err(|_| Error::from_reason("DateTime month is out of range"))?,
+        day: u8::try_from(call_js_date_i32(date, method("getDate", "getUTCDate"))?)
+            .map_err(|_| Error::from_reason("DateTime day is out of range"))?,
+        hour: u8::try_from(call_js_date_i32(date, method("getHours", "getUTCHours"))?)
+            .map_err(|_| Error::from_reason("DateTime hour is out of range"))?,
+        minute: u8::try_from(call_js_date_i32(date, method("getMinutes", "getUTCMinutes"))?)
+            .map_err(|_| Error::from_reason("DateTime minute is out of range"))?,
+        second: u8::try_from(call_js_date_i32(date, method("getSeconds", "getUTCSeconds"))?)
+            .map_err(|_| Error::from_reason("DateTime second is out of range"))?,
+        microsecond: u32::try_from(call_js_date_i32(date, method("getMilliseconds", "getUTCMilliseconds"))?)
+            .map_err(|_| Error::from_reason("DateTime millisecond is out of range"))?
+            * 1000,
+        offset_seconds,
+        timezone_name,
+    })
+}
+
+fn js_date_with_offset<'e>(date: Object<'_>, env: &'e Env, offset_seconds: i32) -> Result<Object<'e>> {
+    let time_ms = call_js_date_f64(date, "getTime")?;
+    let adjusted_ms = time_ms + f64::from(offset_seconds) * 1000.0;
+    let global = env.get_global()?;
+    let date_constructor: Function<f64> = global.get_named_property("Date")?;
+    date_constructor.new_instance(adjusted_ms)?.coerce_to_object()
+}
+
+fn call_js_date_i32(date: Object<'_>, method_name: &str) -> Result<i32> {
+    let value = call_js_date_f64(date, method_name)?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "JavaScript Date component methods return small integers"
+    )]
+    Ok(value as i32)
+}
+
+fn call_js_date_f64(date: Object<'_>, method_name: &str) -> Result<f64> {
+    let method: Function<()> = date.get_named_property(method_name)?;
+    let value: Unknown = method.apply(date, ())?;
+    value.coerce_to_number()?.get_double()
 }
 
 /// Converts a JS Map to `MontyObject::Dict`.

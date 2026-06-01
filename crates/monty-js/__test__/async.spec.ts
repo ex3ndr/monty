@@ -87,6 +87,22 @@ test('runMontyAsync with args and kwargs', async (t) => {
   t.is(result, 'test: 3')
 })
 
+test('runMontyAsync handles OS datetime.now via externalFunctions', async (t) => {
+  const m = new Monty(`
+from datetime import datetime, timezone
+now = datetime.now(timezone.utc)
+[now.year, now.month, now.day, now.hour, now.minute, now.second, now.microsecond]
+`)
+
+  const result = await runMontyAsync(m, {
+    externalFunctions: {
+      'datetime.now': () => new Date(Date.UTC(2027, 1, 3, 4, 5, 6, 7)),
+    },
+  })
+
+  t.deepEqual(result, [2027, 2, 3, 4, 5, 6, 7000])
+})
+
 // =============================================================================
 // Error handling tests
 // =============================================================================

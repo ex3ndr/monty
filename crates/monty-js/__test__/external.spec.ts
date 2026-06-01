@@ -143,6 +143,22 @@ test('external function with input', (t) => {
   t.is(m.run({ inputs: { x: 5 }, externalFunctions: { process } }), 50)
 })
 
+test('OS datetime.now can be handled by externalFunctions', (t) => {
+  const m = new Monty(`
+from datetime import datetime
+now = datetime.now()
+[now.year, now.month, now.day, now.hour, now.minute, now.second, now.microsecond]
+`)
+
+  const result = m.run({
+    externalFunctions: {
+      'datetime.now': () => new Date(2026, 0, 2, 3, 4, 5, 6),
+    },
+  })
+
+  t.deepEqual(result, [2026, 1, 2, 3, 4, 5, 6000])
+})
+
 // =============================================================================
 // Error handling tests
 // =============================================================================

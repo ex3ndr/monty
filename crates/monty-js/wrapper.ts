@@ -57,6 +57,8 @@ export interface StartOptions extends Omit<NativeStartOptions, 'mount'> {
 
 /** Options for REPL feed(). */
 export interface FeedOptions extends Omit<NativeFeedOptions, 'mount'> {
+  /** Callback invoked on each print() call. */
+  printCallback?: (stream: string, text: string) => void
   /** Filesystem mount(s) for the sandbox. */
   mount?: MountDir | MountDir[]
 }
@@ -421,6 +423,20 @@ export class MontyRepl {
     return result
   }
 
+  /**
+   * Starts one incremental snippet and returns a resumable progress object.
+   *
+   * @param code - Snippet code to execute
+   * @param options - Optional feed options (mount, printCallback)
+   * @returns MontySnapshot if paused at function/OS call, MontyNameLookup if
+   *   paused at name lookup, MontyComplete if done
+   * @throws {MontyRuntimeError} If execution raises an exception
+   */
+  feedStart(code: string, options?: FeedOptions): MontySnapshot | MontyNameLookup | MontyComplete {
+    const result = this._native.feedStart(code, options)
+    return wrapStartResult(result)
+  }
+
   /** Serializes the REPL session to bytes. */
   dump(): Buffer {
     return this._native.dump()
@@ -484,6 +500,11 @@ export class MontySnapshot {
   /** Returns the name of the external function being called. */
   get functionName(): string {
     return this._native.functionName
+  }
+
+  /** Returns true when this snapshot represents an OS-level operation. */
+  get isOsFunction(): boolean {
+    return this._native.isOsFunction
   }
 
   /** Returns the positional arguments passed to the external function. */
@@ -687,13 +708,17 @@ export async function runMontyAsync(montyRunner: Monty, options: RunMontyAsyncOp
     const extFunction = externalFunctions[funcName]
 
     if (!extFunction) {
-      // Function not found — this shouldn't normally happen since NameLookup
-      // would have raised NameError, but handle it defensively
+      const exception = snapshot.isOsFunction
+        ? {
+            type: 'RuntimeError',
+            message: `'${funcName}' is not supported in this environment`,
+          }
+        : {
+            type: 'NameError',
+            message: `name '${funcName}' is not defined`,
+          }
       progress = snapshot.resume({
-        exception: {
-          type: 'NameError',
-          message: `name '${funcName}' is not defined`,
-        },
+        exception,
       })
       continue
     }

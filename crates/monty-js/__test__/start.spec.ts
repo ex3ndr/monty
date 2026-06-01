@@ -398,18 +398,36 @@ test('start can reuse monty instance', (t) => {
 // OS call handling in start() tests
 // =============================================================================
 
-test('os.environ via start() throws RuntimeError', (t) => {
+test('os.environ via start() returns OS snapshot', (t) => {
   const m = new Monty('import os\nx = os.environ')
-  const error = t.throws(() => m.start(), { instanceOf: MontyRuntimeError })
-  t.is(error.exception.typeName, 'RuntimeError')
-  t.is(error.exception.message, "'os.environ' is not supported in this environment")
+  const progress = m.start()
+  t.true(progress instanceof MontySnapshot)
+  t.is((progress as MontySnapshot).functionName, 'os.environ')
+  t.true((progress as MontySnapshot).isOsFunction)
+  t.deepEqual((progress as MontySnapshot).args, [])
+  t.deepEqual((progress as MontySnapshot).kwargs, {})
 })
 
-test('os.getenv via start() throws RuntimeError', (t) => {
+test('os.getenv via start() returns OS snapshot', (t) => {
   const m = new Monty("import os\nx = os.getenv('HOME')")
-  const error = t.throws(() => m.start(), { instanceOf: MontyRuntimeError })
-  t.is(error.exception.typeName, 'RuntimeError')
-  t.is(error.exception.message, "'os.getenv' is not supported in this environment")
+  const progress = m.start()
+  t.true(progress instanceof MontySnapshot)
+  t.is((progress as MontySnapshot).functionName, 'os.getenv')
+  t.true((progress as MontySnapshot).isOsFunction)
+  t.deepEqual((progress as MontySnapshot).args, ['HOME', null])
+  t.deepEqual((progress as MontySnapshot).kwargs, {})
+})
+
+test('datetime.now via start() returns OS snapshot and resumes', (t) => {
+  const m = new Monty('from datetime import datetime\nnow = datetime.now()\nnow.year')
+  const progress = m.start()
+  t.true(progress instanceof MontySnapshot)
+  t.is((progress as MontySnapshot).functionName, 'datetime.now')
+  t.true((progress as MontySnapshot).isOsFunction)
+
+  const complete = (progress as MontySnapshot).resume({ returnValue: new Date(2031, 6, 8, 9, 10, 11, 12) })
+  t.true(complete instanceof MontyComplete)
+  t.is((complete as MontyComplete).output, 2031)
 })
 
 // =============================================================================
