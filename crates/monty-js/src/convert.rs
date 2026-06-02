@@ -624,6 +624,11 @@ fn js_date_with_offset<'e>(date: Object<'_>, env: &'e Env, offset_seconds: i32) 
 
 fn call_js_date_i32(date: Object<'_>, method_name: &str) -> Result<i32> {
     let value = call_js_date_f64(date, method_name)?;
+    if value.fract() != 0.0 || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+        return Err(Error::from_reason(format!(
+            "Date method {method_name} returned an out-of-range integer"
+        )));
+    }
     #[expect(
         clippy::cast_possible_truncation,
         reason = "JavaScript Date component methods return small integers"
@@ -634,7 +639,13 @@ fn call_js_date_i32(date: Object<'_>, method_name: &str) -> Result<i32> {
 fn call_js_date_f64(date: Object<'_>, method_name: &str) -> Result<f64> {
     let method: Function<()> = date.get_named_property(method_name)?;
     let value: Unknown = method.apply(date, ())?;
-    value.coerce_to_number()?.get_double()
+    let value = value.coerce_to_number()?.get_double()?;
+    if !value.is_finite() {
+        return Err(Error::from_reason(format!(
+            "Date method {method_name} returned an invalid number"
+        )));
+    }
+    Ok(value)
 }
 
 /// Converts a JS Map to `MontyObject::Dict`.

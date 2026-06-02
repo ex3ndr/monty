@@ -1,6 +1,6 @@
 import test from 'ava'
 
-import { MontyComplete, MontyRepl, MontySnapshot } from '../wrapper'
+import { MontyComplete, MontyRepl, MontyRuntimeError, MontySnapshot } from '../wrapper'
 
 test('feed preserves state without replay', (t) => {
   const repl = new MontyRepl()
@@ -59,4 +59,21 @@ test('feedStart pauses and resumes OS calls', (t) => {
   t.true(progress instanceof MontyComplete)
   t.is((progress as MontyComplete).output, 2032)
   t.is(repl.feed('stamp.month'), 5)
+})
+
+test('feedStart restores REPL after print callback error', (t) => {
+  const repl = new MontyRepl()
+
+  const error = t.throws(
+    () =>
+      repl.feedStart('value = 41\nprint(value)', {
+        printCallback: () => {
+          throw new Error('print failed')
+        },
+      }),
+    { instanceOf: MontyRuntimeError },
+  )
+  t.true(error.message.includes('print failed'))
+  t.is(repl.feed('value = 41'), null)
+  t.is(repl.feed('value + 1'), 42)
 })

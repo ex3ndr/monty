@@ -159,6 +159,23 @@ now = datetime.now()
   t.deepEqual(result, [2026, 1, 2, 3, 4, 5, 6000])
 })
 
+test('OS datetime.now rejects invalid JS Date results', (t) => {
+  const m = new Monty(`
+from datetime import datetime
+now = datetime.now()
+now.year
+`)
+
+  const error = t.throws(() =>
+    m.run({
+      externalFunctions: {
+        'datetime.now': () => new Date(Number.NaN),
+      },
+    }),
+  )
+  t.true(error?.message.includes('Date method getFullYear returned an invalid number'))
+})
+
 // =============================================================================
 // Error handling tests
 // =============================================================================

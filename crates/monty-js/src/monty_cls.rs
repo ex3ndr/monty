@@ -658,28 +658,38 @@ impl MontyRepl {
         options: Option<FeedOptions<'env>>,
     ) -> Result<Either4<MontySnapshot, MontyNameLookup, MontyComplete, JsMontyException>> {
         let options = options.unwrap_or_default();
+        let print_callback_ref = options.print_callback.as_ref().map(Function::create_ref).transpose()?;
+        let mut print_cb = match &print_callback_ref {
+            Some(func) => Some(CallbackStringPrint::new_js_ref(env, func)?),
+            None => None,
+        };
         let os_handler = match options.mount.as_ref() {
             Some(obj) => OsHandler::from_extracted(extract_mounts(obj)?),
             None => None,
         };
         let mount_table: Option<MountTable> = os_handler.as_ref().map(OsHandler::take).transpose()?;
         let mount_state = os_handler.zip(mount_table);
-        let print_callback_ref = options.print_callback.as_ref().map(Function::create_ref).transpose()?;
 
-        let repl = take_shared_repl(&self.repl)?;
+        let repl = match take_shared_repl(&self.repl) {
+            Ok(repl) => repl,
+            Err(err) => {
+                put_back_mount_state(mount_state);
+                return Err(err);
+            }
+        };
         let repl_state = Arc::clone(&self.repl);
 
         macro_rules! feed_start_impl {
             ($repl:expr) => {{
-                let mut print_cb = match &print_callback_ref {
-                    Some(func) => Some(CallbackStringPrint::new_js_ref(env, func)?),
-                    None => None,
+                let progress = {
+                    let print_writer = match &mut print_cb {
+                        Some(cb) => PrintWriter::Callback(cb),
+                        None => PrintWriter::Stdout,
+                    };
+                    $repl.feed_start(&code, vec![], print_writer)
                 };
-                let print_writer = match &mut print_cb {
-                    Some(cb) => PrintWriter::Callback(cb),
-                    None => PrintWriter::Stdout,
-                };
-                let progress = match $repl.feed_start(&code, vec![], print_writer) {
+                drop(print_cb);
+                let progress = match progress {
                     Ok(p) => p,
                     Err(e) => {
                         put_shared_repl(&repl_state, EitherRepl::from_core(e.repl))?;
@@ -754,6 +764,11 @@ impl MontyRepl {
         os_handler: Option<OsHandler>,
         print_callback: Option<JsPrintCallbackRef>,
     ) -> Result<Either<JsMontyObject<'env>, JsMontyException>> {
+        let mut print_cb = match &print_callback {
+            Some(func) => Some(CallbackStringPrint::new_js_ref(env, func)?),
+            None => None,
+        };
+
         // Take mounts out of shared slots
         let mut mount_table: Option<MountTable> = os_handler.as_ref().map(OsHandler::take).transpose()?;
 
@@ -764,14 +779,16 @@ impl MontyRepl {
         };
 
         // Take the REPL out (feed_start consumes it)
-        let repl = take_shared_repl(&self.repl)?;
+        let repl = match take_shared_repl(&self.repl) {
+            Ok(repl) => repl,
+            Err(err) => {
+                put_back(mount_table);
+                return Err(err);
+            }
+        };
 
         macro_rules! feed_loop {
             ($repl:expr) => {{
-                let mut print_cb = match &print_callback {
-                    Some(func) => Some(CallbackStringPrint::new_js_ref(env, func)?),
-                    None => None,
-                };
                 let print_writer = match &mut print_cb {
                     Some(cb) => PrintWriter::Callback(cb),
                     None => PrintWriter::Stdout,
@@ -1750,7 +1767,13 @@ where
     // Build a reusable print callback so OsCall resumes use the JS callback
     // instead of falling back to stdout.
     let mut print_cb = match &print_callback {
-        Some(func) => Some(CallbackStringPrint::new_js_ref(env, func)?),
+        Some(func) => match CallbackStringPrint::new_js_ref(env, func) {
+            Ok(cb) => Some(cb),
+            Err(err) => {
+                put_back_mount_state(mount_state);
+                return Err(err);
+            }
+        },
         None => None,
     };
 
@@ -1848,7 +1871,15 @@ where
     EitherLookupSnapshot: FromReplLookupSnapshot<T>,
 {
     let mut print_cb = match &print_callback {
-        Some(func) => Some(CallbackStringPrint::new_js_ref(env, func)?),
+        Some(func) => match CallbackStringPrint::new_js_ref(env, func) {
+            Ok(cb) => Some(cb),
+            Err(err) => {
+                let repl = EitherRepl::from_core(progress.into_repl());
+                put_back_mount_state(mount_state);
+                put_shared_repl(&repl_state, repl)?;
+                return Err(err);
+            }
+        },
         None => None,
     };
 
