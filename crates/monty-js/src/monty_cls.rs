@@ -659,7 +659,7 @@ impl MontyRepl {
     ) -> Result<Either4<MontySnapshot, MontyNameLookup, MontyComplete, JsMontyException>> {
         let options = options.unwrap_or_default();
         let print_callback_ref = options.print_callback.as_ref().map(Function::create_ref).transpose()?;
-        let mut print_cb = match &print_callback_ref {
+        let print_cb = match &print_callback_ref {
             Some(func) => Some(CallbackStringPrint::new_js_ref(env, func)?),
             None => None,
         };
@@ -682,13 +682,13 @@ impl MontyRepl {
         macro_rules! feed_start_impl {
             ($repl:expr) => {{
                 let progress = {
+                    let mut print_cb = print_cb;
                     let print_writer = match &mut print_cb {
                         Some(cb) => PrintWriter::Callback(cb),
                         None => PrintWriter::Stdout,
                     };
                     $repl.feed_start(&code, vec![], print_writer)
                 };
-                drop(print_cb);
                 let progress = match progress {
                     Ok(p) => p,
                     Err(e) => {
@@ -1991,7 +1991,7 @@ fn handle_os_function_with_table(call: &OsFunctionCall, table: &mut MountTable) 
     match table.handle_os_call(call) {
         Some(Ok(obj)) => Some(obj.into()),
         Some(Err(mount_err)) => Some(mount_err.into_exception().into()),
-        None => return None,
+        None => None,
     }
 }
 
